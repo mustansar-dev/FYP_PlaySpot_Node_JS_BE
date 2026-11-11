@@ -1,0 +1,757 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "ts"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  PLAYER
+  VENDOR
+
+  @@map("user_role")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+
+  @@map("user_status")
+}
+
+enum VendorVerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+
+  @@map("vendor_verification_status")
+}
+
+enum IndoorOutdoor {
+  INDOOR
+  OUTDOOR
+
+  @@map("indoor_outdoor")
+}
+
+enum EquipmentPriceMode {
+  RENTAL
+  SALE
+
+  @@map("equipment_price_mode")
+}
+
+enum MediaKind {
+  PHOTO
+  VIDEO
+
+  @@map("media_kind")
+}
+
+enum BookingSource {
+  APP
+  WALK_IN
+  TOURNAMENT
+
+  @@map("booking_source")
+}
+
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  EXPIRED
+
+  @@map("booking_status")
+}
+
+enum BookingPaymentStatus {
+  DUE_AT_VENUE
+  PENDING
+  PARTIALLY_PAID
+  PAID
+  FAILED
+  REFUND_PENDING
+  REFUNDED
+  CASH_REFUND_DUE
+  CASH_REFUNDED
+
+  @@map("booking_payment_status")
+}
+
+enum PaymentMode {
+  PAY_AT_VENUE
+  ONLINE
+
+  @@map("payment_mode")
+}
+
+enum ContributionStatus {
+  UNPAID
+  PENDING
+  PARTIALLY_PAID
+  PAID
+  FAILED
+  REFUND_PENDING
+  REFUNDED
+
+  @@map("contribution_status")
+}
+
+enum PaymentProvider {
+  SAFEPAY
+  DEVELOPMENT_MOCK
+
+  @@map("payment_provider")
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  REFUND_PENDING
+  REFUNDED
+
+  @@map("payment_status")
+}
+
+enum PaymentPurpose {
+  BOOKING_CONTRIBUTION
+  TOURNAMENT_ENTRY
+
+  @@map("payment_purpose")
+}
+
+enum RoomVisibility {
+  PUBLIC
+  PRIVATE
+
+  @@map("room_visibility")
+}
+
+enum GameRoomStatus {
+  OPEN
+  FULL
+  CLOSED
+  CANCELLED
+
+  @@map("game_room_status")
+}
+
+enum RoomMemberRole {
+  ORGANIZER
+  PLAYER
+
+  @@map("room_member_role")
+}
+
+enum RoomShareStatus {
+  OPEN
+  UNPAID
+  PENDING
+  PAID
+  DUE_AT_VENUE
+  REFUNDED
+
+  @@map("room_share_status")
+}
+
+enum ConversationKind {
+  VENUE_VENDOR
+  GAME_ROOM
+  TOURNAMENT
+  SUPPORT
+
+  @@map("conversation_kind")
+}
+
+enum TournamentStatus {
+  UPCOMING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@map("tournament_status")
+}
+
+enum TournamentParticipantStatus {
+  REGISTERED
+  WITHDRAWN
+  DISQUALIFIED
+
+  @@map("tournament_participant_status")
+}
+
+enum NotificationType {
+  BOOKING
+  PAYMENT
+  CHAT
+  TOURNAMENT
+  REVIEW
+  SYSTEM
+
+  @@map("notification_type")
+}
+
+model User {
+  id                   String                  @id @default(uuid()) @db.Uuid
+  role                 UserRole
+  status               UserStatus              @default(ACTIVE)
+  name                 String                  @db.VarChar(120)
+  email                String                  @unique @db.VarChar(320)
+  phone                String?                 @unique @db.VarChar(32)
+  passwordHash         String                  @map("password_hash") @db.VarChar(255)
+  createdAt            DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime                @updatedAt @map("updated_at") @db.Timestamptz(3)
+  preferredSports      UserSport[]
+  vendorProfile        VendorProfile?
+  refreshTokens        RefreshToken[]
+  createdCourtBlocks   CourtBlock[]            @relation("CourtBlockCreator")
+  playerBookings       Booking[]               @relation("BookingCustomer")
+  createdBookings      Booking[]               @relation("BookingCreator")
+  bookingParticipants  BookingParticipant[]
+  reviews              Review[]
+  organizedRooms       GameRoom[]              @relation("RoomOrganizer")
+  roomMemberships      GameRoomMember[]
+  roomShares           GameRoomShare[]
+  conversations        ConversationMember[]
+  sentMessages         Message[]
+  organizedTournaments Tournament[]            @relation("TournamentOrganizer")
+  tournamentEntries    TournamentParticipant[]
+  payments             Payment[]
+  notifications        Notification[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id           String         @id @default(uuid()) @db.Uuid
+  userId       String         @map("user_id") @db.Uuid
+  tokenHash    String         @unique @map("token_hash") @db.VarChar(255)
+  expiresAt    DateTime       @map("expires_at") @db.Timestamptz(3)
+  revokedAt    DateTime?      @map("revoked_at") @db.Timestamptz(3)
+  replacedById String?        @map("replaced_by_id") @db.Uuid
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacedBy   RefreshToken?  @relation("RefreshTokenRotation", fields: [replacedById], references: [id], onDelete: SetNull)
+  replaces     RefreshToken[] @relation("RefreshTokenRotation")
+
+  @@index([userId, expiresAt])
+  @@map("refresh_tokens")
+}
+
+model VendorProfile {
+  id                 String                   @id @default(uuid()) @db.Uuid
+  ownerUserId        String                   @unique @map("owner_user_id") @db.Uuid
+  businessName       String                   @map("business_name") @db.VarChar(160)
+  contactPhone       String                   @map("contact_phone") @db.VarChar(32)
+  verificationStatus VendorVerificationStatus @default(PENDING) @map("verification_status")
+  createdAt          DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(3)
+  owner              User                     @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  venues             Venue[]
+
+  @@map("vendor_profiles")
+}
+
+model Sport {
+  id              String          @id @default(uuid()) @db.Uuid
+  code            String          @unique @db.VarChar(40)
+  name            String          @unique @db.VarChar(60)
+  isActive        Boolean         @default(true) @map("is_active")
+  userPreferences UserSport[]
+  venueOfferings  VenueSport[]
+  courts          Court[]
+  equipmentItems  EquipmentItem[]
+  gameRooms       GameRoom[]
+  tournaments     Tournament[]
+
+  @@map("sports")
+}
+
+model UserSport {
+  userId  String @map("user_id") @db.Uuid
+  sportId String @map("sport_id") @db.Uuid
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sport   Sport  @relation(fields: [sportId], references: [id], onDelete: Restrict)
+
+  @@id([userId, sportId])
+  @@map("user_sports")
+}
+
+model Venue {
+  id               String                                @id @default(uuid()) @db.Uuid
+  vendorProfileId  String                                @map("vendor_profile_id") @db.Uuid
+  name             String                                @db.VarChar(160)
+  description      String?
+  address          String                                @db.VarChar(500)
+  city             String                                @db.VarChar(100)
+  locationNote     String?                               @map("location_note") @db.VarChar(160)
+  latitude         Float?
+  longitude        Float?
+  location         Unsupported("geography(Point,4326)")?
+  timeZone         String                                @default("Asia/Karachi") @map("time_zone") @db.VarChar(64)
+  parkingAvailable Boolean                               @default(false) @map("parking_available")
+  parkingSpaces    Int                                   @default(0) @map("parking_spaces")
+  published        Boolean                               @default(false)
+  createdAt        DateTime                              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime                              @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt        DateTime?                             @map("deleted_at") @db.Timestamptz(3)
+  vendorProfile    VendorProfile                         @relation(fields: [vendorProfileId], references: [id], onDelete: Restrict)
+  sports           VenueSport[]
+  amenities        VenueAmenity[]
+  media            VenueMedia[]
+  courts           Court[]
+  equipment        EquipmentItem[]
+  bookings         Booking[]
+  reviews          Review[]
+  conversations    Conversation[]
+  gameRooms        GameRoom[]
+  tournaments      Tournament[]
+
+  @@index([vendorProfileId, deletedAt])
+  @@index([city, published, deletedAt])
+  @@map("venues")
+}
+
+model VenueSport {
+  venueId String @map("venue_id") @db.Uuid
+  sportId String @map("sport_id") @db.Uuid
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  sport   Sport  @relation(fields: [sportId], references: [id], onDelete: Restrict)
+
+  @@id([venueId, sportId])
+  @@map("venue_sports")
+}
+
+model Amenity {
+  id       String         @id @default(uuid()) @db.Uuid
+  name     String         @unique @db.VarChar(80)
+  isActive Boolean        @default(true) @map("is_active")
+  venues   VenueAmenity[]
+
+  @@map("amenities")
+}
+
+model VenueAmenity {
+  venueId   String  @map("venue_id") @db.Uuid
+  amenityId String  @map("amenity_id") @db.Uuid
+  venue     Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  amenity   Amenity @relation(fields: [amenityId], references: [id], onDelete: Restrict)
+
+  @@id([venueId, amenityId])
+  @@map("venue_amenities")
+}
+
+model VenueMedia {
+  id          String    @id @default(uuid()) @db.Uuid
+  venueId     String    @map("venue_id") @db.Uuid
+  kind        MediaKind
+  storagePath String    @map("storage_path") @db.VarChar(500)
+  fileName    String?   @map("file_name") @db.VarChar(255)
+  mimeType    String    @map("mime_type") @db.VarChar(120)
+  sizeBytes   Int       @map("size_bytes")
+  position    Int       @default(0)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  venue       Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@index([venueId, position])
+  @@map("venue_media")
+}
+
+model Court {
+  id                  String        @id @default(uuid()) @db.Uuid
+  venueId             String        @map("venue_id") @db.Uuid
+  sportId             String        @map("sport_id") @db.Uuid
+  name                String        @db.VarChar(120)
+  widthMeters         Decimal       @map("width_meters") @db.Decimal(8, 2)
+  lengthMeters        Decimal       @map("length_meters") @db.Decimal(8, 2)
+  indoorOutdoor       IndoorOutdoor @map("indoor_outdoor")
+  surface             String        @db.VarChar(60)
+  conditionRating     Int           @map("condition_rating")
+  hourlyPricePaisa    Int           @map("hourly_price_paisa")
+  slotDurationMinutes Int           @map("slot_duration_minutes")
+  openingTime         String        @default("09:00") @map("opening_time") @db.VarChar(5)
+  closingTime         String        @default("17:00") @map("closing_time") @db.VarChar(5)
+  availableDays       String[]      @default([]) @map("available_days")
+  isActive            Boolean       @default(true) @map("is_active")
+  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  venue               Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  sport               Sport         @relation(fields: [sportId], references: [id], onDelete: Restrict)
+  blocks              CourtBlock[]
+  bookings            Booking[]
+  gameRooms           GameRoom[]
+
+  @@index([venueId, isActive])
+  @@index([sportId, isActive])
+  @@map("courts")
+}
+
+model CourtBlock {
+  id          String   @id @default(uuid()) @db.Uuid
+  courtId     String   @map("court_id") @db.Uuid
+  startsAt    DateTime @map("starts_at") @db.Timestamptz(3)
+  endsAt      DateTime @map("ends_at") @db.Timestamptz(3)
+  reason      String?  @db.VarChar(255)
+  createdById String   @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  court       Court    @relation(fields: [courtId], references: [id], onDelete: Cascade)
+  createdBy   User     @relation("CourtBlockCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([courtId, startsAt, endsAt])
+  @@map("court_blocks")
+}
+
+model EquipmentItem {
+  id                String             @id @default(uuid()) @db.Uuid
+  venueId           String             @map("venue_id") @db.Uuid
+  sportId           String?            @map("sport_id") @db.Uuid
+  name              String             @db.VarChar(120)
+  priceMode         EquipmentPriceMode @map("price_mode")
+  unitPricePaisa    Int                @map("unit_price_paisa")
+  quantityAvailable Int                @map("quantity_available")
+  active            Boolean            @default(true)
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  venue             Venue              @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  sport             Sport?             @relation(fields: [sportId], references: [id], onDelete: SetNull)
+  bookingItems      BookingItem[]
+
+  @@index([venueId, active])
+  @@map("equipment_items")
+}
+
+model Booking {
+  id               String               @id @default(uuid()) @db.Uuid
+  venueId          String               @map("venue_id") @db.Uuid
+  courtId          String               @map("court_id") @db.Uuid
+  customerUserId   String?              @map("customer_user_id") @db.Uuid
+  createdByUserId  String?              @map("created_by_user_id") @db.Uuid
+  tournamentId     String?              @map("tournament_id") @db.Uuid
+  source           BookingSource
+  status           BookingStatus        @default(PENDING_PAYMENT)
+  paymentMode      PaymentMode          @map("payment_mode")
+  paymentStatus    BookingPaymentStatus @default(PENDING) @map("payment_status")
+  startsAt         DateTime             @map("starts_at") @db.Timestamptz(3)
+  endsAt           DateTime             @map("ends_at") @db.Timestamptz(3)
+  timeZone         String               @default("Asia/Karachi") @map("time_zone") @db.VarChar(64)
+  customerName     String?              @map("customer_name") @db.VarChar(120)
+  customerPhone    String?              @map("customer_phone") @db.VarChar(32)
+  groundFeePaisa   Int                  @map("ground_fee_paisa")
+  addOnsTotalPaisa Int                  @default(0) @map("add_ons_total_paisa")
+  totalPaisa       Int                  @map("total_paisa")
+  currency         String               @default("PKR") @db.VarChar(3)
+  idempotencyKey   String?              @unique @map("idempotency_key") @db.VarChar(128)
+  cancelledAt      DateTime?            @map("cancelled_at") @db.Timestamptz(3)
+  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  venue            Venue                @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  court            Court                @relation(fields: [courtId], references: [id], onDelete: Restrict)
+  customer         User?                @relation("BookingCustomer", fields: [customerUserId], references: [id], onDelete: SetNull)
+  createdBy        User?                @relation("BookingCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  tournament       Tournament?          @relation(fields: [tournamentId], references: [id], onDelete: SetNull)
+  items            BookingItem[]
+  participants     BookingParticipant[]
+  reviews          Review[]
+  gameRoom         GameRoom?            @relation("RoomBooking")
+
+  @@index([customerUserId, startsAt])
+  @@index([venueId, startsAt, status])
+  @@index([courtId, startsAt, status])
+  @@map("bookings")
+}
+
+model BookingItem {
+  id                String             @id @default(uuid()) @db.Uuid
+  bookingId         String             @map("booking_id") @db.Uuid
+  equipmentItemId   String?            @map("equipment_item_id") @db.Uuid
+  nameSnapshot      String             @map("name_snapshot") @db.VarChar(120)
+  priceModeSnapshot EquipmentPriceMode @map("price_mode_snapshot")
+  unitPricePaisa    Int                @map("unit_price_paisa")
+  quantity          Int
+  lineTotalPaisa    Int                @map("line_total_paisa")
+  booking           Booking            @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  equipmentItem     EquipmentItem?     @relation(fields: [equipmentItemId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@map("booking_items")
+}
+
+model BookingParticipant {
+  id            String               @id @default(uuid()) @db.Uuid
+  bookingId     String               @map("booking_id") @db.Uuid
+  userId        String               @map("user_id") @db.Uuid
+  isOrganizer   Boolean              @default(false) @map("is_organizer")
+  sharePaisa    Int                  @map("share_paisa")
+  paymentStatus ContributionStatus   @default(UNPAID) @map("payment_status")
+  joinedAt      DateTime             @default(now()) @map("joined_at") @db.Timestamptz(3)
+  booking       Booking              @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  user          User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  contribution  PaymentContribution?
+
+  @@unique([bookingId, userId])
+  @@index([userId, joinedAt])
+  @@map("booking_participants")
+}
+
+model PaymentContribution {
+  id                   String             @id @default(uuid()) @db.Uuid
+  bookingParticipantId String             @unique @map("booking_participant_id") @db.Uuid
+  amountDuePaisa       Int                @map("amount_due_paisa")
+  amountPaidPaisa      Int                @default(0) @map("amount_paid_paisa")
+  status               ContributionStatus @default(UNPAID)
+  createdAt            DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+  bookingParticipant   BookingParticipant @relation(fields: [bookingParticipantId], references: [id], onDelete: Cascade)
+  payments             Payment[]
+
+  @@map("payment_contributions")
+}
+
+model Payment {
+  id                      String                 @id @default(uuid()) @db.Uuid
+  userId                  String                 @map("user_id") @db.Uuid
+  provider                PaymentProvider
+  purpose                 PaymentPurpose
+  status                  PaymentStatus          @default(PENDING)
+  amountPaisa             Int                    @map("amount_paisa")
+  currency                String                 @default("PKR") @db.VarChar(3)
+  contributionId          String?                @map("contribution_id") @db.Uuid
+  tournamentParticipantId String?                @map("tournament_participant_id") @db.Uuid
+  providerReference       String?                @unique @map("provider_reference") @db.VarChar(255)
+  checkoutUrl             String?                @map("checkout_url") @db.VarChar(2048)
+  idempotencyKey          String?                @map("idempotency_key") @db.VarChar(128)
+  metadata                Json?
+  settledAt               DateTime?              @map("settled_at") @db.Timestamptz(3)
+  createdAt               DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user                    User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
+  contribution            PaymentContribution?   @relation(fields: [contributionId], references: [id], onDelete: Restrict)
+  tournamentParticipant   TournamentParticipant? @relation(fields: [tournamentParticipantId], references: [id], onDelete: Restrict)
+  webhookEvents           WebhookEvent[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("payments")
+}
+
+model WebhookEvent {
+  id                String          @id @default(uuid()) @db.Uuid
+  provider          PaymentProvider
+  providerEventId   String          @map("provider_event_id") @db.VarChar(255)
+  paymentId         String?         @map("payment_id") @db.Uuid
+  signatureVerified Boolean         @default(false) @map("signature_verified")
+  eventType         String          @map("event_type") @db.VarChar(120)
+  redactedPayload   Json            @map("redacted_payload")
+  processingError   String?         @map("processing_error") @db.VarChar(500)
+  processedAt       DateTime?       @map("processed_at") @db.Timestamptz(3)
+  receivedAt        DateTime        @default(now()) @map("received_at") @db.Timestamptz(3)
+  payment           Payment?        @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, providerEventId])
+  @@index([receivedAt])
+  @@map("webhook_events")
+}
+
+model GameRoom {
+  id                  String           @id @default(uuid()) @db.Uuid
+  organizerUserId     String           @map("organizer_user_id") @db.Uuid
+  sportId             String           @map("sport_id") @db.Uuid
+  venueId             String?          @map("venue_id") @db.Uuid
+  courtId             String?          @map("court_id") @db.Uuid
+  bookingId           String?          @unique @map("booking_id") @db.Uuid
+  title               String           @db.VarChar(160)
+  locationLabel       String           @map("location_label") @db.VarChar(255)
+  startsAt            DateTime         @map("starts_at") @db.Timestamptz(3)
+  endsAt              DateTime         @map("ends_at") @db.Timestamptz(3)
+  timeZone            String           @default("Asia/Karachi") @map("time_zone") @db.VarChar(64)
+  visibility          RoomVisibility
+  inviteCodeHash      String?          @map("invite_code_hash") @db.VarChar(255)
+  capacity            Int
+  totalCostPaisa      Int              @map("total_cost_paisa")
+  perPlayerSharePaisa Int              @map("per_player_share_paisa")
+  paymentMode         PaymentMode      @map("payment_mode")
+  status              GameRoomStatus   @default(OPEN)
+  createdAt           DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  organizer           User             @relation("RoomOrganizer", fields: [organizerUserId], references: [id], onDelete: Restrict)
+  sport               Sport            @relation(fields: [sportId], references: [id], onDelete: Restrict)
+  venue               Venue?           @relation(fields: [venueId], references: [id], onDelete: SetNull)
+  court               Court?           @relation(fields: [courtId], references: [id], onDelete: SetNull)
+  booking             Booking?         @relation("RoomBooking", fields: [bookingId], references: [id], onDelete: SetNull)
+  members             GameRoomMember[]
+  shares              GameRoomShare[]
+  conversation        Conversation?
+
+  @@index([visibility, status, startsAt])
+  @@index([organizerUserId, startsAt])
+  @@map("game_rooms")
+}
+
+model GameRoomMember {
+  id         String         @id @default(uuid()) @db.Uuid
+  gameRoomId String         @map("game_room_id") @db.Uuid
+  userId     String         @map("user_id") @db.Uuid
+  role       RoomMemberRole @default(PLAYER)
+  seatIndex  Int            @map("seat_index")
+  joinedAt   DateTime       @default(now()) @map("joined_at") @db.Timestamptz(3)
+  gameRoom   GameRoom       @relation(fields: [gameRoomId], references: [id], onDelete: Cascade)
+  user       User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([gameRoomId, userId])
+  @@unique([gameRoomId, seatIndex])
+  @@map("game_room_members")
+}
+
+model GameRoomShare {
+  id          String          @id @default(uuid()) @db.Uuid
+  gameRoomId  String          @map("game_room_id") @db.Uuid
+  userId      String?         @map("user_id") @db.Uuid
+  seatIndex   Int             @map("seat_index")
+  amountPaisa Int             @map("amount_paisa")
+  status      RoomShareStatus @default(OPEN)
+  gameRoom    GameRoom        @relation(fields: [gameRoomId], references: [id], onDelete: Cascade)
+  user        User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([gameRoomId, seatIndex])
+  @@unique([gameRoomId, userId])
+  @@map("game_room_shares")
+}
+
+model Conversation {
+  id           String               @id @default(uuid()) @db.Uuid
+  kind         ConversationKind
+  venueId      String?              @map("venue_id") @db.Uuid
+  gameRoomId   String?              @unique @map("game_room_id") @db.Uuid
+  tournamentId String?              @unique @map("tournament_id") @db.Uuid
+  title        String               @db.VarChar(180)
+  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  venue        Venue?               @relation(fields: [venueId], references: [id], onDelete: SetNull)
+  gameRoom     GameRoom?            @relation(fields: [gameRoomId], references: [id], onDelete: Cascade)
+  tournament   Tournament?          @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  members      ConversationMember[]
+  messages     Message[]
+
+  @@index([venueId, kind])
+  @@map("conversations")
+}
+
+model ConversationMember {
+  conversationId String       @map("conversation_id") @db.Uuid
+  userId         String       @map("user_id") @db.Uuid
+  joinedAt       DateTime     @default(now()) @map("joined_at") @db.Timestamptz(3)
+  lastReadAt     DateTime?    @map("last_read_at") @db.Timestamptz(3)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId, lastReadAt])
+  @@map("conversation_members")
+}
+
+model Message {
+  id             String       @id @default(uuid()) @db.Uuid
+  conversationId String       @map("conversation_id") @db.Uuid
+  senderUserId   String       @map("sender_user_id") @db.Uuid
+  body           String       @db.VarChar(4000)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         User         @relation(fields: [senderUserId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+model Tournament {
+  id                     String                  @id @default(uuid()) @db.Uuid
+  organizerUserId        String                  @map("organizer_user_id") @db.Uuid
+  venueId                String                  @map("venue_id") @db.Uuid
+  sportId                String                  @map("sport_id") @db.Uuid
+  title                  String                  @db.VarChar(180)
+  startsAt               DateTime                @map("starts_at") @db.Timestamptz(3)
+  endsAt                 DateTime                @map("ends_at") @db.Timestamptz(3)
+  timeZone               String                  @default("Asia/Karachi") @map("time_zone") @db.VarChar(64)
+  maxTeams               Int                     @map("max_teams")
+  teamSize               Int                     @map("team_size")
+  entryFeePerPlayerPaisa Int                     @map("entry_fee_per_player_paisa")
+  prizePaisa             Int                     @map("prize_paisa")
+  status                 TournamentStatus        @default(UPCOMING)
+  registrationOpen       Boolean                 @default(true) @map("registration_open")
+  winnerTeamName         String?                 @map("winner_team_name") @db.VarChar(120)
+  createdAt              DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime                @updatedAt @map("updated_at") @db.Timestamptz(3)
+  organizer              User                    @relation("TournamentOrganizer", fields: [organizerUserId], references: [id], onDelete: Restrict)
+  venue                  Venue                   @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  sport                  Sport                   @relation(fields: [sportId], references: [id], onDelete: Restrict)
+  reservations           Booking[]
+  participants           TournamentParticipant[]
+  conversation           Conversation?
+
+  @@index([status, startsAt])
+  @@index([organizerUserId, startsAt])
+  @@map("tournaments")
+}
+
+model TournamentParticipant {
+  id                     String                      @id @default(uuid()) @db.Uuid
+  tournamentId           String                      @map("tournament_id") @db.Uuid
+  userId                 String                      @map("user_id") @db.Uuid
+  teamName               String?                     @map("team_name") @db.VarChar(120)
+  teamMemberNames        String[]                    @default([]) @map("team_member_names")
+  entryFeePerPlayerPaisa Int                         @map("entry_fee_per_player_paisa")
+  totalEntryFeePaisa     Int                         @map("total_entry_fee_paisa")
+  status                 TournamentParticipantStatus @default(REGISTERED)
+  paymentStatus          ContributionStatus          @default(PENDING) @map("payment_status")
+  wins                   Int                         @default(0)
+  points                 Int                         @default(0)
+  joinedAt               DateTime                    @default(now()) @map("joined_at") @db.Timestamptz(3)
+  tournament             Tournament                  @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  user                   User                        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  payments               Payment[]
+
+  @@unique([tournamentId, userId])
+  @@index([tournamentId, points, wins])
+  @@map("tournament_participants")
+}
+
+model Review {
+  id           String   @id @default(uuid()) @db.Uuid
+  venueId      String   @map("venue_id") @db.Uuid
+  bookingId    String   @map("booking_id") @db.Uuid
+  playerUserId String   @map("player_user_id") @db.Uuid
+  stars        Int
+  comment      String   @db.VarChar(2000)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  venue        Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  booking      Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  player       User     @relation(fields: [playerUserId], references: [id], onDelete: Restrict)
+
+  @@unique([bookingId, playerUserId])
+  @@index([venueId, createdAt])
+  @@map("reviews")
+}
+
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @map("user_id") @db.Uuid
+  type      NotificationType
+  title     String           @db.VarChar(180)
+  body      String           @db.VarChar(1000)
+  payload   Json?
+  readAt    DateTime?        @map("read_at") @db.Timestamptz(3)
+  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
