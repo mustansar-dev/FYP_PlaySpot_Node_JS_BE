@@ -8,12 +8,15 @@ import { notFound } from './middleware/notFound.js';
 import { createHealthRouter, type DatabaseHealthCheck } from './routes/health.js';
 import type { PrismaClient } from './generated/prisma/client.js';
 import { createAuthRouter } from './modules/auth/router.js';
+import { createVenueRouter } from './modules/venues/router.js';
+import type { VenueStorage } from './modules/venues/storage.js';
 
 export interface AppOptions {
   apiPrefix: string;
   allowedOrigins: string[];
   checkDatabase: DatabaseHealthCheck;
   auth?: { prisma: PrismaClient; accessSecret: string; refreshSecret: string };
+  venues?: { prisma: PrismaClient; accessSecret: string; storage?: VenueStorage };
 }
 
 export function createApp(options: AppOptions): Express {
@@ -39,6 +42,7 @@ export function createApp(options: AppOptions): Express {
   });
   app.use(options.apiPrefix, createHealthRouter(options.checkDatabase));
   if (options.auth) app.use(`${options.apiPrefix}`, createAuthRouter(options.auth));
+  if (options.venues) app.use(`${options.apiPrefix}`, createVenueRouter(options.venues));
   app.use(notFound);
   app.use(errorHandler);
 

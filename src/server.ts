@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { loadConfig } from './config/env.js';
 import { disconnectPrismaClient, getPrismaClient } from './database/prisma.js';
 import { createApp } from './app.js';
+import { SupabaseVenueStorage } from './modules/venues/storage.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -14,6 +15,13 @@ async function main(): Promise<void> {
       prisma,
       accessSecret: config.JWT_ACCESS_SECRET!,
       refreshSecret: config.JWT_REFRESH_SECRET!,
+    },
+    venues: {
+      prisma,
+      accessSecret: config.JWT_ACCESS_SECRET!,
+      ...(config.SUPABASE_URL && config.SUPABASE_SERVICE_ROLE_KEY ? {
+        storage: new SupabaseVenueStorage(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, config.SUPABASE_STORAGE_BUCKET),
+      } : {}),
     },
   });
   const server = createServer(app);
