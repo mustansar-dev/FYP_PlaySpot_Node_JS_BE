@@ -42,5 +42,12 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     .map(origin => origin.trim())
     .filter(Boolean);
 
+  if (result.data.NODE_ENV !== 'test') {
+    const missing = (['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'] as const).filter(key =>
+      !result.data[key] || result.data[key]!.length < 32,
+    );
+    if (missing.length) throw new Error(`Invalid environment configuration: ${missing.join(', ')} must each contain at least 32 characters`);
+  }
+
   return { ...result.data, allowedOrigins };
 }

@@ -10,6 +10,11 @@ async function main(): Promise<void> {
     apiPrefix: config.API_PREFIX,
     allowedOrigins: config.allowedOrigins,
     checkDatabase: async () => { await prisma.$queryRaw`SELECT 1`; },
+    auth: {
+      prisma,
+      accessSecret: config.JWT_ACCESS_SECRET!,
+      refreshSecret: config.JWT_REFRESH_SECRET!,
+    },
   });
   const server = createServer(app);
 

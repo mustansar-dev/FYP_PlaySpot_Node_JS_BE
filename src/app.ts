@@ -6,11 +6,14 @@ import { HttpError } from './common/httpError.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
 import { createHealthRouter, type DatabaseHealthCheck } from './routes/health.js';
+import type { PrismaClient } from './generated/prisma/client.js';
+import { createAuthRouter } from './modules/auth/router.js';
 
 export interface AppOptions {
   apiPrefix: string;
   allowedOrigins: string[];
   checkDatabase: DatabaseHealthCheck;
+  auth?: { prisma: PrismaClient; accessSecret: string; refreshSecret: string };
 }
 
 export function createApp(options: AppOptions): Express {
@@ -35,6 +38,7 @@ export function createApp(options: AppOptions): Express {
     response.status(200).json(apiSuccess({ status: 'ok' }));
   });
   app.use(options.apiPrefix, createHealthRouter(options.checkDatabase));
+  if (options.auth) app.use(`${options.apiPrefix}`, createAuthRouter(options.auth));
   app.use(notFound);
   app.use(errorHandler);
 

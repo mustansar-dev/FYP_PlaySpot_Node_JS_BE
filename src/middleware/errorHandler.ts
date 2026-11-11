@@ -9,5 +9,10 @@ export const errorHandler: ErrorRequestHandler = (error: unknown, _request, resp
     return;
   }
 
+  if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
+    response.status(409).json(apiError('DUPLICATE_ACCOUNT', 'An account with those details already exists.'));
+    return;
+  }
+
   response.status(500).json(apiError('INTERNAL_ERROR', 'An unexpected server error occurred.'));
 };

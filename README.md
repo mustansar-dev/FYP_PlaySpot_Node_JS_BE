@@ -1,22 +1,22 @@
 # PlaySpot PK Backend
 
-PlaySpot PK is a React Native sports-venue booking and matchmaking app. This repository is the initial API and database foundation. It currently provides a small Express health API and a Prisma schema/migration foundation; feature endpoints have **not** been implemented yet.
+PlaySpot PK is a React Native sports-venue booking and matchmaking app. This repository contains the initial API foundation and Prompt 1 authentication/profile endpoints. Venue catalog, booking, payments and community endpoints remain unimplemented.
 
 ## Project and working state
 
 - Frontend: [FYP_PlaySpot_React_Native_FE](https://github.com/mustansar-dev/FYP_PlaySpot_React_Native_FE).
 - Frontend checkout inspected for this foundation: `/home/ibrahim/rn_lab_workspace/FYP_PlaySpot_React_Native_FE`. This path is machine-specific; use the repository URL on another computer.
 - Backend runtime: Node.js 22 with npm. This machine has Node `v22.17.0` and npm `10.9.2`; Prisma 7.10.1 supports Node 22.12+.
-- Backend branch observed: `main`; only `main` is available locally/remotely at the time of this foundation. The plan's `develop` and `feature/backend-foundation` branches do not exist here. This work has not changed branches or been committed.
+- Branch at Prompt 1 start: `feature/project-setup-with-schema`. The prompt names `feature/auth-booking` after merging the foundation to `develop`, but that is not the active branch in this checkout. This session preserved the current branch and did not commit.
 - Two supplied planning prompts are present as untracked files in this checkout. They are task inputs and are intentionally not copied into this README or altered.
 - Exactly one README is maintained in this repository: this root file. Setup, contract, schema, decisions and limitations stay here.
 
-## Prompt 0 scope and implementation plan
+## Completed scope
 
 1. Inspect the current frontend's routes, forms, Redux/local-storage services and demo data, then record screen-to-API requirements below.
 2. Implement only the backend foundation: validated configuration, Express app, liveness/readiness health routes, Prisma schema, PostGIS/exclusion-constraint migration and idempotent reference-data seed.
 3. Validate the schema/client and run typecheck, lint, tests and build.
-4. Do not implement later-prompt feature routes, payment provider calls, maps, media upload, authentication or sockets in this foundation.
+4. Prompt 1 adds player/vendor registration, login, refresh rotation, logout/revocation, current-user/profile routes, vendor profile onboarding/status and role guards.
 5. Do not apply a migration to a shared database until the team-approved development target and credentials are configured. No Supabase connection URL or credentials were present during this work; local PostgreSQL has no PostGIS extension installed.
 
 ## Frontend audit
@@ -29,7 +29,7 @@ The inspected frontend is a bare React Native CLI application (`react-native` 0.
 |---|---|---|---|
 | Welcome / Role selection | Select `player` or `vendor`; navigation only | None | Public navigation only. |
 | Player registration | `name`, `email`, `phone`, `password`, `confirmPassword`, `preferredSports[]` | `POST /api/v1/auth/register/player` | Public; server validates and returns a user plus access/refresh session. Never store or return passwords/hashes. |
-| Vendor registration | Account fields plus `businessName`, `venueName`, `address`, `city`, `locationNote`, optional `latitude`/`longitude`, `sports[]`, one or more `grounds[]`, `facilities[]`, parking fields, `equipment[]`, photo URIs and optional video URI | `POST /api/v1/auth/register/vendor` creates the account/profile/venue/courts/equipment in one transaction; media upload is a later signed-upload flow | Public registration, then vendor-owned records. Court fields: `name`, `sport`, `widthMeters`, `lengthMeters`, `indoorOutdoor`, `surface`, `conditionRating`, `hourlyPricePKR`, `slotDurationMinutes`, `openingTime`, `closingTime`, `availableDays[]`. Current local photo/video URIs are device paths, not uploadable server URLs. |
+| Vendor registration | Account fields plus `businessName`, `venueName`, `address`, `city`, `locationNote`, optional `latitude`/`longitude`, `sports[]`, one or more `grounds[]`, `facilities[]`, parking fields, `equipment[]`, photo URIs and optional video URI | Implemented first step: `POST /api/v1/auth/register/vendor` creates account and pending vendor profile. Venue/court/equipment onboarding is not implemented yet; those fields are not accepted by this endpoint. | Public registration, then vendor-owned records. Court fields: `name`, `sport`, `widthMeters`, `lengthMeters`, `indoorOutdoor`, `surface`, `conditionRating`, `hourlyPricePKR`, `slotDurationMinutes`, `openingTime`, `closingTime`, `availableDays[]`. Current local photo/video URIs are device paths, not uploadable server URLs. |
 | Login / session restore / logout | `email`, `password`; current auth repository stores local account/session IDs | `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/me` | Public login/refresh; other calls authenticated. Frontend token storage/refresh integration is still required. |
 | Edit profile / Settings | `name`, `phone`, player `preferredSports[]`, vendor `businessName`; local appearance/session controls | `GET/PATCH /api/v1/users/me`, `GET/PATCH /api/v1/vendors/me` | Authenticated owner. Theme is frontend session state; logout revokes the refresh token. Forgot Password currently explicitly says no email or OTP was sent. |
 | Player home / Venue Search | Search text, `sport`, hourly budget, minimum rating, distance, indoor/outdoor, sort; default origin is Lahore coordinates | `GET /api/v1/venues`, `GET /api/v1/venues/nearby?lat=&lng=&radiusKm=&sport=&...` | Public read. PostGIS performs the radius filter and nearest-first order. Search can return `{id,name,address,city,locationNote,sports,facilities,parkingAvailable,parkingSpaces,latitude,longitude,distanceKm,ratingAverage,ratingCount,minimumHourlyPricePKR,media[]}`. |
@@ -68,11 +68,11 @@ Error response:
 {"success":false,"error":{"code":"VALIDATION_ERROR","message":"The request is invalid.","details":[]}}
 ```
 
-The health-only foundation implements `GET /health` (liveness) and `GET /api/v1/health` (database readiness). Other routes below are the initial contract proposal and remain unimplemented.
+The API implements `GET /health` (liveness), `GET /api/v1/health` (database readiness), and the auth/profile endpoints listed below. Other routes remain proposed and unimplemented.
 
 | Group | Proposed routes | Auth |
 |---|---|---|
-| Auth/user | `POST /auth/register/player`, `POST /auth/register/vendor`, `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me`, `GET/PATCH /users/me`, `GET/PATCH /vendors/me` | Public or authenticated as appropriate |
+| Auth/user | `POST /api/v1/auth/register/player`, `POST /api/v1/auth/register/vendor`, `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/me`, `GET/PATCH /api/v1/users/me`, `GET/PATCH /api/v1/vendors/me` | Implemented; public/authenticated as appropriate |
 | Venues/catalog | `GET /venues`, `GET /venues/nearby`, `GET /venues/:venueId`, `POST/PATCH /venues/:venueId`, `GET /venues/:venueId/courts`, `POST/PATCH /venues/:venueId/courts/:courtId`, venue media/amenity/equipment routes | Public reads; owning vendor writes |
 | Discovery/reviews | `GET /venues/:venueId/reviews`, `POST /venues/:venueId/reviews`, `GET /courts/:courtId/availability?date=...` | Public reads; eligible booking player review |
 | Booking | `POST /bookings`, `GET /bookings/me`, `GET /bookings/:bookingId`, `POST /bookings/:bookingId/cancel`, `GET /vendors/me/bookings`, `POST /vendors/me/bookings/walk-in` | Player or owning vendor |
@@ -84,12 +84,21 @@ The health-only foundation implements `GET /health` (liveness) and `GET /api/v1/
 ### DTO conventions
 
 - Public roles map to the frontend's `player` and `vendor` values. Server internals use `PLAYER`/`VENDOR` roles and never trust a client role field.
-- Frontend registration JSON uses `name`, `email`, `phone`, `password`, `preferredSports[]`; vendor registration adds nested `vendorProfile` and `grounds[]`/`equipment[]` as documented in the matrix.
+- Player registration uses `name`, `email`, `phone`, `password`, `confirmPassword`, `preferredSports[]`; the current vendor registration endpoint accepts account fields plus `businessName` and optional `contactPhone`. The frontend's full vendor draft (`venueName`, `grounds[]`, equipment, facilities and media) still requires the later onboarding/catalog endpoints.
 - Frontend's ground record is named `ground`; API model is `Court`. Request/response DTOs should expose `groundId`/`groundName` where preserving current mobile property names avoids a large screen rewrite, while route names and DB use `courtId`/`Court` consistently.
 - UI money values are integer PKR rupees (`hourlyPricePKR`, `totalPKR`, `entryFeePKR`). Database/payment values are integer paisa (`...Paisa`). Explicit DTO functions divide/multiply by 100; never use floating point for stored money.
 - UI schedule fields are local `date: YYYY-MM-DD`, `startTime/endTime: HH:MM`. API persists UTC `timestamptz` plus `Asia/Karachi` venue timezone and formats local fields for current screens.
 - Venue discovery response should retain names expected by `VenueCard`: `id`, `name`, `address`, `city`, `locationNote`, `sports[]`, `facilities[]`, `latitude`, `longitude`, `parkingAvailable`, `parkingSpaces`, `published`, plus computed `distanceKm`, `ratingAverage`, `ratingCount`, `minimumHourlyPricePKR`.
 - Booking DTO should keep `venueName`, `groundName`, `date`, `startTime`, `endTime`, `durationMinutes`, `groundFeePKR`, `addOns[]`, `addOnsTotalPKR`, `totalPKR`, `source`, `status`, and `paymentStatus` for the existing booking cards.
+
+### Authentication behavior
+
+- Player registration accepts `name`, `email`, optional `phone`, `password`, `confirmPassword` and optional `preferredSports[]`. Vendor registration accepts the account fields plus `businessName` and optional `contactPhone`; it creates the `VendorProfile` with `PENDING` verification status. Venue/court/equipment setup and media upload remain separate later work.
+- Login accepts the frontend form `{ "email": "...", "password": "..." }` or `{ "identifier": "email-or-phone", "password": "..." }`, and returns `{ user, accessToken, refreshToken, tokenType }`. Email matching is case-insensitive; phone matching is also supported.
+- Access JWTs last 15 minutes. Refresh tokens are random opaque values; only an HMAC-SHA256 digest is stored. Refresh rotates the token, and reuse of a revoked token revokes the user's active refresh sessions. Logout revokes all of the authenticated user's refresh sessions.
+- Authenticated requests use `Authorization: Bearer <accessToken>`. The API checks the current user status and role in PostgreSQL for protected requests. `/auth/me` and `/users/me` return the safe user DTO; vendor routes require the persisted `VENDOR` role and scope by the authenticated owner.
+- Registration/login/refresh share an in-memory IP rate limit (20 requests per 15 minutes). Multi-instance deployments need a shared limiter store.
+- No email/SMS verification or OTP is sent. Vendor verification remains `PENDING`; approval workflow is not implemented.
 
 ## Initial database model and relationships
 
@@ -143,7 +152,7 @@ Feature module directories are intentionally not stubbed before their owners beg
 5. **Reviews:** current review UI submits venue ID, stars and comment without a booking ID. Prompt 0 keeps the plan's eligible-booking rule; connect the UI to include a booking or get explicit approval to broaden eligibility.
 6. **Authentication:** forgot-password UI expressly says no email/OTP is sent. This foundation does not implement OTP or claim email delivery. Player/vendor registration UI currently creates local accounts; future API integration must carry the vendor nested venue draft and return a real backend user/session.
 7. **Legacy local data:** current frontend seeds fictional local venues, sample bookings, conversations, tournaments and leaderboards. API responses must replace these deliberately in Prompt 6; do not copy fixture rows into the shared database as real providers/customers.
-8. **Branch safety:** the backend repo was on `main` with only two untracked prompt input files and no `develop`/feature branch. Per the global instruction not to switch with uncommitted files, branch was left unchanged and no commit was made. Review the working tree and create the team's feature branch before committing/PR.
+8. **Branch safety:** Prompt 1 changes are uncommitted on `feature/project-setup-with-schema`; the team plan's `feature/auth-booking` branch was not active here. Review the working tree and move the completed changes through the team's agreed branch/PR workflow.
 
 ## Environment and commands
 
@@ -152,6 +161,7 @@ Node.js 22 and npm are used to match the installed environment. Copy the environ
 ```bash
 cp .env.example .env
 # Edit DATABASE_URL to point to your own local database or the team-approved Supabase dev project.
+# Set JWT_ACCESS_SECRET and JWT_REFRESH_SECRET to different random values of at least 32 characters.
 npm ci
 npm run prisma:validate
 npm run prisma:generate
@@ -181,12 +191,12 @@ For Android Emulator access to a development host, Android's standard emulator h
 | `API_PREFIX` | No | Versioned route prefix; default `/api/v1`. |
 | `APP_ORIGINS` | No | Comma-separated browser origins; default local Metro web origin. Native requests without an Origin header are accepted. |
 | `DATABASE_URL` | Yes | PostgreSQL connection for Prisma. |
-| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Later | Add only for Prompt 1 auth; use independent high-entropy values. |
+| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Yes outside tests | Independent random secrets, at least 32 characters each. Server startup fails when either is missing or short. Refresh token digests use the refresh secret; JWT access tokens use the access secret. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` | Later | Server-side signed media upload only; never expose service key to frontend. |
 | `GEOAPIFY_API_KEY` | Later/optional | Server-side geocoding if needed; manual coordinates remain the fallback. |
 | `SAFEPAY_ENV`, `SAFEPAY_SECRET_KEY`, `SAFEPAY_API_KEY`, `SAFEPAY_WEBHOOK_SECRET`, `SAFEPAY_RETURN_URL`, `SAFEPAY_CANCEL_URL` | Later | Safepay sandbox; no live payment is enabled in this foundation. |
 
-## Prompt 0 verification results
+## Verification results
 
 - `DATABASE_URL=postgresql://playspot:local-only@localhost:5432/playspot_dev npm ci` — passed from the lockfile (412 packages). The URL was a placeholder; install/generation did not connect to a database.
 - `npm test` — passed: 2 files / 8 tests (environment validation, blank optional `.env.example` URLs, CORS, health/readiness and 404 behavior).

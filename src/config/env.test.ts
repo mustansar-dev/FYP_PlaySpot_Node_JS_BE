@@ -31,4 +31,11 @@ describe('loadConfig', () => {
     expect(config.SAFEPAY_RETURN_URL).toBeUndefined();
     expect(config.SAFEPAY_CANCEL_URL).toBeUndefined();
   });
+
+  it('requires independent-length auth secrets outside test mode', () => {
+    const base = { NODE_ENV: 'development', DATABASE_URL: 'postgresql://test:test@localhost:5432/playspot_test' };
+    expect(() => loadConfig(base)).toThrow(/JWT_ACCESS_SECRET, JWT_REFRESH_SECRET/);
+    expect(() => loadConfig({ ...base, JWT_ACCESS_SECRET: 'too-short', JWT_REFRESH_SECRET: 'also-too-short' })).toThrow(/at least 32 characters/);
+    expect(loadConfig({ ...base, JWT_ACCESS_SECRET: 'a'.repeat(32), JWT_REFRESH_SECRET: 'b'.repeat(32) }).JWT_ACCESS_SECRET).toHaveLength(32);
+  });
 });
