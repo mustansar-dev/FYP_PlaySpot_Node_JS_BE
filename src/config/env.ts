@@ -22,6 +22,8 @@ const envSchema = z.object({
   SUPABASE_STORAGE_BUCKET: z.string().default('venue-media'),
   GEOAPIFY_API_KEY: z.string().optional(),
   SAFEPAY_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
+  PAYMENT_PROVIDER: z.enum(['safepay', 'development_mock']).default('safepay'),
+  PAYMENT_RECEIPTS_BUCKET: z.string().trim().min(1).max(100).default('payment-receipts'),
   SAFEPAY_SECRET_KEY: z.string().optional(),
   SAFEPAY_API_KEY: z.string().optional(),
   SAFEPAY_WEBHOOK_SECRET: z.string().optional(),
@@ -47,6 +49,13 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       !result.data[key] || result.data[key]!.length < 32,
     );
     if (missing.length) throw new Error(`Invalid environment configuration: ${missing.join(', ')} must each contain at least 32 characters`);
+  }
+
+  if (result.data.SAFEPAY_ENV !== 'sandbox') {
+    throw new Error('Invalid environment configuration: SAFEPAY_ENV must be sandbox; live transactions are disabled.');
+  }
+  if (result.data.NODE_ENV === 'production' && result.data.PAYMENT_PROVIDER === 'development_mock') {
+    throw new Error('Invalid environment configuration: PAYMENT_PROVIDER=development_mock is not allowed in production.');
   }
 
   return { ...result.data, allowedOrigins };

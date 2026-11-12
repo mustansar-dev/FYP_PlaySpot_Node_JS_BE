@@ -1,0 +1,13 @@
+CREATE TYPE "payment_method" AS ENUM ('ONLINE', 'PAY_AT_VENUE', 'BANK_TRANSFER');
+CREATE TYPE "payment_environment" AS ENUM ('SANDBOX', 'DEVELOPMENT', 'MANUAL');
+CREATE TYPE "payment_receipt_status" AS ENUM ('SUBMITTED', 'APPROVED', 'REJECTED');
+
+ALTER TYPE "payment_mode" ADD VALUE 'BANK_TRANSFER';
+ALTER TYPE "payment_provider" ADD VALUE 'MANUAL';
+ALTER TYPE "payment_purpose" ADD VALUE 'WALK_IN_BOOKING';
+ALTER TYPE "payment_status" ADD VALUE 'PROCESSING';
+ALTER TYPE "payment_status" ADD VALUE 'DUE_AT_VENUE';
+ALTER TYPE "payment_status" ADD VALUE 'AWAITING_TRANSFER';
+ALTER TYPE "payment_status" ADD VALUE 'PROOF_SUBMITTED';
+ALTER TYPE "payment_status" ADD VALUE 'EXPIRED';
+ALTER TYPE "payment_status" ADD VALUE 'REJECTED';

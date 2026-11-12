@@ -10,6 +10,10 @@ import type { PrismaClient } from './generated/prisma/client.js';
 import { createAuthRouter } from './modules/auth/router.js';
 import { createVenueRouter } from './modules/venues/router.js';
 import type { VenueStorage } from './modules/venues/storage.js';
+import { createBookingRouter } from './modules/bookings/router.js';
+import { createPaymentRouter } from './modules/payments/router.js';
+import type { PaymentGateway } from './integrations/payments/provider.js';
+import type { PaymentReceiptStorage } from './modules/payments/storage.js';
 
 export interface AppOptions {
   apiPrefix: string;
@@ -17,6 +21,11 @@ export interface AppOptions {
   checkDatabase: DatabaseHealthCheck;
   auth?: { prisma: PrismaClient; accessSecret: string; refreshSecret: string };
   venues?: { prisma: PrismaClient; accessSecret: string; storage?: VenueStorage };
+  bookings?: {
+    prisma: PrismaClient; accessSecret: string;
+    onlineProvider: { provider: 'SAFEPAY' | 'DEVELOPMENT_MOCK'; environment: 'SANDBOX' | 'DEVELOPMENT' };
+  };
+  payments?: { prisma: PrismaClient; accessSecret: string; gateway: PaymentGateway; storage?: PaymentReceiptStorage; nodeEnv: 'development' | 'test' | 'production' };
 }
 
 export function createApp(options: AppOptions): Express {
@@ -43,6 +52,8 @@ export function createApp(options: AppOptions): Express {
   app.use(options.apiPrefix, createHealthRouter(options.checkDatabase));
   if (options.auth) app.use(`${options.apiPrefix}`, createAuthRouter(options.auth));
   if (options.venues) app.use(`${options.apiPrefix}`, createVenueRouter(options.venues));
+  if (options.bookings) app.use(`${options.apiPrefix}`, createBookingRouter(options.bookings));
+  if (options.payments) app.use(`${options.apiPrefix}`, createPaymentRouter(options.payments));
   app.use(notFound);
   app.use(errorHandler);
 

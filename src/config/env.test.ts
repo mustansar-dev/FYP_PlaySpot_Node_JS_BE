@@ -38,4 +38,13 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, JWT_ACCESS_SECRET: 'too-short', JWT_REFRESH_SECRET: 'also-too-short' })).toThrow(/at least 32 characters/);
     expect(loadConfig({ ...base, JWT_ACCESS_SECRET: 'a'.repeat(32), JWT_REFRESH_SECRET: 'b'.repeat(32) }).JWT_ACCESS_SECRET).toHaveLength(32);
   });
+
+  it('rejects live Safepay mode and the development mock in production', () => {
+    const production = {
+      NODE_ENV: 'production', DATABASE_URL: 'postgresql://test:test@localhost:5432/playspot_test',
+      JWT_ACCESS_SECRET: 'a'.repeat(32), JWT_REFRESH_SECRET: 'b'.repeat(32),
+    };
+    expect(() => loadConfig({ ...production, SAFEPAY_ENV: 'production' })).toThrow(/SAFEPAY_ENV must be sandbox/);
+    expect(() => loadConfig({ ...production, PAYMENT_PROVIDER: 'development_mock' })).toThrow(/not allowed in production/);
+  });
 });

@@ -87,6 +87,7 @@ enum BookingPaymentStatus {
 enum PaymentMode {
   PAY_AT_VENUE
   ONLINE
+  BANK_TRANSFER
 
   @@map("payment_mode")
 }
@@ -106,15 +107,22 @@ enum ContributionStatus {
 enum PaymentProvider {
   SAFEPAY
   DEVELOPMENT_MOCK
+  MANUAL
 
   @@map("payment_provider")
 }
 
 enum PaymentStatus {
   PENDING
+  PROCESSING
+  DUE_AT_VENUE
+  AWAITING_TRANSFER
+  PROOF_SUBMITTED
   SUCCEEDED
   FAILED
   CANCELLED
+  EXPIRED
+  REJECTED
   REFUND_PENDING
   REFUNDED
 
@@ -124,8 +132,33 @@ enum PaymentStatus {
 enum PaymentPurpose {
   BOOKING_CONTRIBUTION
   TOURNAMENT_ENTRY
+  WALK_IN_BOOKING
 
   @@map("payment_purpose")
+}
+
+enum PaymentMethod {
+  ONLINE
+  PAY_AT_VENUE
+  BANK_TRANSFER
+
+  @@map("payment_method")
+}
+
+enum PaymentEnvironment {
+  SANDBOX
+  DEVELOPMENT
+  MANUAL
+
+  @@map("payment_environment")
+}
+
+enum PaymentReceiptStatus {
+  SUBMITTED
+  APPROVED
+  REJECTED
+
+  @@map("payment_receipt_status")
 }
 
 enum RoomVisibility {
@@ -225,6 +258,8 @@ model User {
   organizedTournaments Tournament[]            @relation("TournamentOrganizer")
   tournamentEntries    TournamentParticipant[]
   payments             Payment[]
+  paymentAudits        PaymentStatusAudit[]       @relation("PaymentStatusAuditActor")
+  reviewedReceipts     PaymentReceipt[]           @relation("PaymentReceiptReviewer")
   notifications        Notification[]
 
   @@map("users")
@@ -256,6 +291,7 @@ model VendorProfile {
   updatedAt          DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(3)
   owner              User                     @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
   venues             Venue[]
+  paymentInstructions VendorPaymentInstructions?
 
   @@map("vendor_profiles")
 }
@@ -449,6 +485,7 @@ model Booking {
   totalPaisa       Int                  @map("total_paisa")
   currency         String               @default("PKR") @db.VarChar(3)
   idempotencyKey   String?              @unique @map("idempotency_key") @db.VarChar(128)
+  holdExpiresAt    DateTime?            @map("hold_expires_at") @db.Timestamptz(3)
   cancelledAt      DateTime?            @map("cancelled_at") @db.Timestamptz(3)
   createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -461,10 +498,12 @@ model Booking {
   participants     BookingParticipant[]
   reviews          Review[]
   gameRoom         GameRoom?            @relation("RoomBooking")
+  payments         Payment[]
 
   @@index([customerUserId, startsAt])
   @@index([venueId, startsAt, status])
   @@index([courtId, startsAt, status])
+  @@index([status, holdExpiresAt])
   @@map("bookings")
 }
 
@@ -517,13 +556,16 @@ model PaymentContribution {
 
 model Payment {
   id                      String                 @id @default(uuid()) @db.Uuid
-  userId                  String                 @map("user_id") @db.Uuid
+  userId                  String?                @map("user_id") @db.Uuid
   provider                PaymentProvider
+  method                  PaymentMethod
+  environment             PaymentEnvironment
   purpose                 PaymentPurpose
   status                  PaymentStatus          @default(PENDING)
   amountPaisa             Int                    @map("amount_paisa")
   currency                String                 @default("PKR") @db.VarChar(3)
   contributionId          String?                @map("contribution_id") @db.Uuid
+  bookingId               String?                @map("booking_id") @db.Uuid
   tournamentParticipantId String?                @map("tournament_participant_id") @db.Uuid
   providerReference       String?                @unique @map("provider_reference") @db.VarChar(255)
   checkoutUrl             String?                @map("checkout_url") @db.VarChar(2048)
@@ -532,15 +574,69 @@ model Payment {
   settledAt               DateTime?              @map("settled_at") @db.Timestamptz(3)
   createdAt               DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt               DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
-  user                    User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
+  user                    User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
   contribution            PaymentContribution?   @relation(fields: [contributionId], references: [id], onDelete: Restrict)
+  booking                 Booking?               @relation(fields: [bookingId], references: [id], onDelete: Restrict)
   tournamentParticipant   TournamentParticipant? @relation(fields: [tournamentParticipantId], references: [id], onDelete: Restrict)
   webhookEvents           WebhookEvent[]
+  receipts                PaymentReceipt[]
+  audits                  PaymentStatusAudit[]
 
   @@unique([userId, idempotencyKey])
   @@index([userId, createdAt])
   @@index([status, createdAt])
   @@map("payments")
+}
+
+model VendorPaymentInstructions {
+  id              String        @id @default(uuid()) @db.Uuid
+  vendorProfileId String        @unique @map("vendor_profile_id") @db.Uuid
+  accountTitle    String        @map("account_title") @db.VarChar(160)
+  bankName        String        @map("bank_name") @db.VarChar(120)
+  iban            String?       @db.VarChar(34)
+  accountNumber   String?       @map("account_number") @db.VarChar(64)
+  instructions    String?       @db.VarChar(1000)
+  active          Boolean       @default(true)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+  vendorProfile   VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  @@map("vendor_payment_instructions")
+}
+
+model PaymentReceipt {
+  id               String               @id @default(uuid()) @db.Uuid
+  paymentId        String               @map("payment_id") @db.Uuid
+  storagePath      String               @unique @map("storage_path") @db.VarChar(500)
+  fileName         String               @map("file_name") @db.VarChar(255)
+  mimeType         String               @map("mime_type") @db.VarChar(120)
+  sizeBytes        Int                  @map("size_bytes")
+  status           PaymentReceiptStatus @default(SUBMITTED)
+  submittedAt      DateTime             @default(now()) @map("submitted_at") @db.Timestamptz(3)
+  reviewedByUserId String?              @map("reviewed_by_user_id") @db.Uuid
+  reviewedAt       DateTime?            @map("reviewed_at") @db.Timestamptz(3)
+  rejectionReason  String?              @map("rejection_reason") @db.VarChar(500)
+  payment          Payment              @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  reviewedBy       User?                @relation("PaymentReceiptReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([paymentId, submittedAt])
+  @@map("payment_receipts")
+}
+
+model PaymentStatusAudit {
+  id             String         @id @default(uuid()) @db.Uuid
+  paymentId      String         @map("payment_id") @db.Uuid
+  actorUserId    String?        @map("actor_user_id") @db.Uuid
+  previousStatus PaymentStatus? @map("previous_status")
+  newStatus      PaymentStatus  @map("new_status")
+  amountPaisa    Int?           @map("amount_paisa")
+  reason         String         @db.VarChar(500)
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  payment        Payment        @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  actor          User?          @relation("PaymentStatusAuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([paymentId, createdAt])
+  @@map("payment_status_audits")
 }
 
 model WebhookEvent {
