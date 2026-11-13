@@ -14,6 +14,9 @@ import { createBookingRouter } from './modules/bookings/router.js';
 import { createPaymentRouter } from './modules/payments/router.js';
 import type { PaymentGateway } from './integrations/payments/provider.js';
 import type { PaymentReceiptStorage } from './modules/payments/storage.js';
+import { RealtimeHub } from './realtime/hub.js';
+import { createCommunityRouter } from './modules/community/router.js';
+import { createAnalyticsRouter } from './modules/analytics/router.js';
 
 export interface AppOptions {
   apiPrefix: string;
@@ -26,6 +29,8 @@ export interface AppOptions {
     onlineProvider: { provider: 'SAFEPAY' | 'DEVELOPMENT_MOCK'; environment: 'SANDBOX' | 'DEVELOPMENT' };
   };
   payments?: { prisma: PrismaClient; accessSecret: string; gateway: PaymentGateway; storage?: PaymentReceiptStorage; nodeEnv: 'development' | 'test' | 'production' };
+  community?: { prisma: PrismaClient; accessSecret: string; realtime: RealtimeHub };
+  analytics?: { prisma: PrismaClient; accessSecret: string };
 }
 
 export function createApp(options: AppOptions): Express {
@@ -54,6 +59,8 @@ export function createApp(options: AppOptions): Express {
   if (options.venues) app.use(`${options.apiPrefix}`, createVenueRouter(options.venues));
   if (options.bookings) app.use(`${options.apiPrefix}`, createBookingRouter(options.bookings));
   if (options.payments) app.use(`${options.apiPrefix}`, createPaymentRouter(options.payments));
+  if (options.community) app.use(`${options.apiPrefix}`, createCommunityRouter(options.community));
+  if (options.analytics) app.use(`${options.apiPrefix}`, createAnalyticsRouter(options.analytics));
   app.use(notFound);
   app.use(errorHandler);
 

@@ -5,6 +5,8 @@ import { createApp } from './app.js';
 import { SupabaseVenueStorage } from './modules/venues/storage.js';
 import { createPaymentGateway } from './integrations/payments/provider.js';
 import { SupabasePaymentReceiptStorage } from './modules/payments/storage.js';
+import { RealtimeHub } from './realtime/hub.js';
+import { attachSocketServer } from './realtime/socket.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -21,6 +23,7 @@ async function main(): Promise<void> {
       ...(config.SAFEPAY_CANCEL_URL ? { cancelUrl: config.SAFEPAY_CANCEL_URL } : {}),
     },
   });
+  const realtime = new RealtimeHub();
   const app = createApp({
     apiPrefix: config.API_PREFIX,
     allowedOrigins: config.allowedOrigins,
@@ -53,8 +56,11 @@ async function main(): Promise<void> {
         ),
       } : {}),
     },
+    community: { prisma, accessSecret: config.JWT_ACCESS_SECRET!, realtime },
+    analytics: { prisma, accessSecret: config.JWT_ACCESS_SECRET! },
   });
   const server = createServer(app);
+  const socketServer = attachSocketServer({ server, prisma, accessSecret: config.JWT_ACCESS_SECRET!, allowedOrigins: config.allowedOrigins, realtime });
 
   server.listen(config.PORT, () => {
     console.info(`PlaySpot API listening on port ${config.PORT} (${config.NODE_ENV})`);
@@ -62,9 +68,7 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: string) => {
     console.info(`Received ${signal}; closing the HTTP server.`);
-    server.close(() => {
-      void disconnectPrismaClient().finally(() => process.exit(0));
-    });
+    socketServer.close(() => { void disconnectPrismaClient().finally(() => process.exit(0)); });
   };
 
   process.once('SIGINT', () => shutdown('SIGINT'));
