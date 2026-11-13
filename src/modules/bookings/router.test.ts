@@ -15,6 +15,12 @@ const venueId = '55555555-5555-4555-8555-555555555555';
 const equipmentId = '66666666-6666-4666-8666-666666666666';
 const bookingId = '77777777-7777-4777-8777-777777777777';
 
+function futureDateKey(): string {
+  const date = new Date();
+  date.setDate(date.getDate() + 2);
+  return date.toISOString().slice(0, 10);
+}
+
 type FakeParticipantData = Record<string, unknown> & {
   userId: string;
   contribution?: { create: Record<string, unknown> };
@@ -113,7 +119,7 @@ describe('booking and walk-in routes', () => {
     const response = await request(app).post('/api/v1/bookings')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        courtId, date: '2026-11-13', startTime: '10:00', endTime: '11:00',
+        courtId, date: futureDateKey(), startTime: '10:00', endTime: '11:00',
         addOns: [{ equipmentId, quantity: 2 }], totalPaisa: 1, totalPKR: 1, paymentStatus: 'PAID',
       });
 
@@ -133,7 +139,7 @@ describe('booking and walk-in routes', () => {
   it('creates equal participant contributions and returns only the authenticated player payment', async () => {
     const { app, token, prisma } = setup();
     const response = await request(app).post('/api/v1/bookings').set('Authorization', `Bearer ${token}`).send({
-      courtId, date: '2026-11-13', startTime: '10:00', endTime: '11:00', participantUserIds: [otherPlayerId],
+      courtId, date: futureDateKey(), startTime: '10:00', endTime: '11:00', participantUserIds: [otherPlayerId],
     });
 
     expect(response.status).toBe(201);
@@ -146,7 +152,7 @@ describe('booking and walk-in routes', () => {
   it('rejects a closed or unavailable slot before writing a booking', async () => {
     const { app, token, prisma } = setup({ conflict: true });
     const response = await request(app).post('/api/v1/bookings').set('Authorization', `Bearer ${token}`).send({
-      courtId, date: '2026-11-13', startTime: '10:00', endTime: '11:00',
+      courtId, date: futureDateKey(), startTime: '10:00', endTime: '11:00',
     });
     expect(response.status).toBe(409);
     expect(response.body.error.code).toBe('SLOT_UNAVAILABLE');
@@ -157,7 +163,7 @@ describe('booking and walk-in routes', () => {
     const { app, token, createdBooking, prisma } = setup({ role: 'VENDOR' });
     const response = await request(app).post('/api/v1/vendors/me/bookings/walk-in')
       .set('Authorization', `Bearer ${token}`)
-      .send({ courtId, date: '2026-11-13', startTime: '10:00', endTime: '11:00', customerName: 'Walk-in Customer', paymentStatus: 'PAID', totalPaisa: 1 });
+      .send({ courtId, date: futureDateKey(), startTime: '10:00', endTime: '11:00', customerName: 'Walk-in Customer', paymentStatus: 'PAID', totalPaisa: 1 });
 
     expect(response.status).toBe(201);
     expect(response.body.data.booking.source).toBe('walk-in');
@@ -175,7 +181,7 @@ describe('booking and walk-in routes', () => {
     const { app, token, createdBooking } = setup({ role: 'VENDOR', ownsCourt: false });
     const response = await request(app).post('/api/v1/vendors/me/bookings/walk-in')
       .set('Authorization', `Bearer ${token}`)
-      .send({ courtId, date: '2026-11-13', startTime: '10:00', endTime: '11:00', customerName: 'Walk-in Customer' });
+      .send({ courtId, date: futureDateKey(), startTime: '10:00', endTime: '11:00', customerName: 'Walk-in Customer' });
     expect(response.status).toBe(404);
     expect(response.body.error.code).toBe('COURT_NOT_FOUND');
     expect(createdBooking).not.toHaveBeenCalled();

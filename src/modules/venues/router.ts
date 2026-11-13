@@ -118,6 +118,17 @@ export function createVenueRouter({ prisma, accessSecret, storage = new Unconfig
   const authenticate = requireAuth(prisma, accessSecret);
   const vendorOnly = requireRole('VENDOR');
 
+  // Public reference catalog required by room and tournament forms, which use sport UUIDs.
+  router.get('/sports', async (_request, response, next) => {
+    try {
+      const items = await prisma.sport.findMany({
+        where: { isActive: true }, orderBy: { name: 'asc' },
+        select: { id: true, name: true, code: true },
+      });
+      response.status(200).json(apiSuccess(items));
+    } catch (error) { next(error); }
+  });
+
   async function vendorProfile(ownerUserId: string) {
     const profile = await prisma.vendorProfile.findUnique({
       where: { ownerUserId }, select: { id: true, verificationStatus: true },

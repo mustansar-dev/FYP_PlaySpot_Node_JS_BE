@@ -73,6 +73,15 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR'; owner?: boolean; eligibleB
 }
 
 describe('venue catalog routes', () => {
+  it('returns active sports with stable IDs for mobile room and tournament forms', async () => {
+    const { app, prisma } = setup();
+    mockMethod(prisma, 'sport', 'findMany').mockResolvedValueOnce([{ id: venueId, name: 'Futsal', code: 'futsal' }] as never);
+    const response = await request(app).get('/api/v1/sports');
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([{ id: venueId, name: 'Futsal', code: 'futsal' }]);
+    expect(mockMethod(prisma, 'sport', 'findMany')).toHaveBeenCalledWith(expect.objectContaining({ where: { isActive: true } }));
+  });
+
   it('rejects out-of-range coordinates before creating a venue', async () => {
     const { app, token, prisma } = setup();
     const response = await request(app).post('/api/v1/venues').set('Authorization', `Bearer ${token}`).send({
