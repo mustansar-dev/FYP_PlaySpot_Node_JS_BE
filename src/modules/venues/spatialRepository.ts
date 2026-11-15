@@ -38,26 +38,26 @@ export async function findNearbyVenueIds(
     WHERE v.deleted_at IS NULL
       AND v.published = TRUE
       AND v.location IS NOT NULL
-      AND extensions.ST_DWithin(
+      AND public.ST_DWithin(
         v.location,
-        extensions.ST_SetSRID(extensions.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::extensions.geography,
+        public.ST_SetSRID(public.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::public.geography,
         ${input.radiusMeters}
       )
       ${filterSql}
   `;
   const result = prisma.$queryRaw<NearbyVenueRow[]>`
     SELECT v.id::text AS id,
-      extensions.ST_Distance(
+      public.ST_Distance(
         v.location,
-        extensions.ST_SetSRID(extensions.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::extensions.geography
+        public.ST_SetSRID(public.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::public.geography
       ) AS distance_m
     FROM public.venues v
     WHERE v.deleted_at IS NULL
       AND v.published = TRUE
       AND v.location IS NOT NULL
-      AND extensions.ST_DWithin(
+      AND public.ST_DWithin(
         v.location,
-        extensions.ST_SetSRID(extensions.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::extensions.geography,
+        public.ST_SetSRID(public.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::public.geography,
         ${input.radiusMeters}
       )
       ${filterSql}
@@ -81,7 +81,7 @@ export async function setVenuePoint(
   }
   await prisma.$executeRaw`
     UPDATE public.venues
-    SET location = extensions.ST_SetSRID(extensions.ST_MakePoint(${longitude}, ${latitude}), 4326)::extensions.geography
+    SET location = public.ST_SetSRID(public.ST_MakePoint(${longitude}, ${latitude}), 4326)::public.geography
     WHERE id = ${venueId}::uuid
   `;
 }

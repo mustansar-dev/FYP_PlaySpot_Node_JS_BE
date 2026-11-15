@@ -1,6 +1,7 @@
 -- PostGIS and btree_gist live in a dedicated schema on Supabase.
 CREATE SCHEMA IF NOT EXISTS "extensions";
-CREATE EXTENSION IF NOT EXISTS postgis SCHEMA "extensions";
+-- PostGIS is a non-relocatable extension installed by PostgreSQL in public.
+CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS btree_gist SCHEMA "extensions";
 SET search_path = "public", "extensions";
 

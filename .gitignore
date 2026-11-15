@@ -54,3 +54,4 @@ pids/
 .vscode-test/
 .DS_Store
 Thumbs.db
+.postgres-local.env
