@@ -7,6 +7,10 @@
 *.p12
 *.pfx
 
+.agents
+.claude
+.windsurf
+
 # Dependencies and generated output
 node_modules/
 jspm_packages/

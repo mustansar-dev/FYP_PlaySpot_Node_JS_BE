@@ -8,7 +8,7 @@ import type { RealtimeHub } from '../../realtime/hub.js';
 import { sendMessage } from './chatService.js';
 import {
   leaderboardQuerySchema, messageCreateSchema, messageListQuerySchema, roomCreateSchema, roomJoinSchema,
-  roomListQuerySchema, roomMemberParamSchema, standingsSchema, tournamentCreateSchema,
+  roomListQuerySchema, standingsSchema, tournamentCreateSchema,
   tournamentCancelSchema, tournamentJoinSchema, tournamentListQuerySchema,
 } from './schemas.js';
 
@@ -40,7 +40,7 @@ function roomDto(room: {
   id: string; title: string; locationLabel: string; startsAt: Date; endsAt: Date; timeZone: string;
   visibility: string; capacity: number; totalCostPaisa: number; perPlayerSharePaisa: number; paymentMode: string;
   status: string; createdAt: Date; organizerUserId: string; sport: { id: string; name: string; code: string };
-  venue: { id: string; name: string; city: string } | null; court: { id: string; name: string } | null;
+  venue: { id: string; name: string; city: string; vendorProfile: { ownerUserId: string } } | null; court: { id: string; name: string } | null;
   members: Array<{ userId: string; role: string; seatIndex: number; user: { id: string; name: string } }>;
 }) {
   return {
@@ -49,7 +49,9 @@ function roomDto(room: {
     visibility: room.visibility, capacity: room.capacity, memberCount: room.members.length,
     totalCostPaisa: room.totalCostPaisa, perPlayerSharePaisa: room.perPlayerSharePaisa,
     paymentMode: room.paymentMode, status: room.status, organizerUserId: room.organizerUserId,
-    sport: room.sport, venue: room.venue, court: room.court,
+    sport: room.sport,
+    venue: room.venue ? { id: room.venue.id, name: room.venue.name, city: room.venue.city } : null,
+    vendorUserId: room.venue?.vendorProfile.ownerUserId ?? null, court: room.court,
     members: room.members.map(member => ({ userId: member.userId, name: member.user.name, role: member.role, seatIndex: member.seatIndex })),
     createdAt: room.createdAt.toISOString(),
   };
@@ -57,16 +59,74 @@ function roomDto(room: {
 
 const roomInclude = {
   sport: { select: { id: true, name: true, code: true } },
-  venue: { select: { id: true, name: true, city: true } },
+  venue: { select: { id: true, name: true, city: true, vendorProfile: { select: { ownerUserId: true } } } },
   court: { select: { id: true, name: true } },
   members: { include: { user: { select: { id: true, name: true } } }, orderBy: { seatIndex: 'asc' as const } },
 } satisfies Prisma.GameRoomInclude;
+
+const conversationInclude = {
+  members: { include: { user: { select: { id: true, name: true, role: true } } } },
+  messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, include: { sender: { select: { id: true, name: true } } } },
+  venue: { select: { id: true, name: true, vendorProfile: { select: { ownerUserId: true } } } },
+  gameRoom: { select: { id: true, visibility: true, status: true } },
+  tournament: { select: { id: true, status: true } },
+} satisfies Prisma.ConversationInclude;
+
+function conversationDto(row: Prisma.ConversationGetPayload<{ include: typeof conversationInclude }>) {
+  const player = row.members.find(member => member.user.role === 'PLAYER');
+  const vendor = row.members.find(member => member.user.role === 'VENDOR');
+  const lastMessage = row.messages[0];
+  return {
+    id: row.id, kind: row.kind, title: row.title, updatedAt: row.updatedAt.toISOString(),
+    ...(row.venue ? { venueId: row.venue.id, venueName: row.venue.name } : {}),
+    vendorUserId: row.venue?.vendorProfile.ownerUserId ?? vendor?.user.id ?? null,
+    playerUserId: player?.user.id ?? null, playerName: player?.user.name ?? null,
+    members: row.members.map(member => member.user),
+    lastMessage: lastMessage ? {
+      id: lastMessage.id, body: lastMessage.body, senderUserId: lastMessage.senderUserId,
+      senderName: lastMessage.sender.name, createdAt: lastMessage.createdAt.toISOString(),
+    } : null,
+    gameRoom: row.gameRoom, tournament: row.tournament,
+  };
+}
 
 export function createCommunityRouter({ prisma, accessSecret, realtime }: CommunityRouterOptions): Router {
   const router = Router();
   const authenticate = requireAuth(prisma, accessSecret);
   const playerOnly = requireRole('PLAYER');
   const vendorOnly = requireRole('VENDOR');
+
+  router.post('/venues/:venueId/conversations', authenticate, playerOnly, async (request, response, next) => {
+    try {
+      const venueId = routeId(request, 'venueId');
+      const conversation = await prisma.$transaction(async tx => {
+        await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "venues" WHERE "id" = ${venueId}::uuid FOR UPDATE`);
+        const venue = await tx.venue.findFirst({
+          where: { id: venueId, published: true, deletedAt: null },
+          select: { id: true, name: true, vendorProfile: { select: { ownerUserId: true } } },
+        });
+        if (!venue) throw new HttpError(404, 'VENUE_NOT_FOUND', 'The venue was not found.');
+        const vendorUserId = venue.vendorProfile.ownerUserId;
+        const existing = await tx.conversation.findFirst({
+          where: {
+            kind: 'VENUE_VENDOR', venueId,
+            AND: [
+              { members: { some: { userId: request.auth!.userId } } },
+              { members: { some: { userId: vendorUserId } } },
+            ],
+          }, include: conversationInclude,
+        });
+        if (existing) return existing;
+        return tx.conversation.create({
+          data: {
+            kind: 'VENUE_VENDOR', venueId, title: `${venue.name} · venue chat`,
+            members: { create: [{ userId: request.auth!.userId }, { userId: vendorUserId }] },
+          }, include: conversationInclude,
+        });
+      });
+      response.status(200).json(apiSuccess(conversationDto(conversation)));
+    } catch (error) { next(error); }
+  });
 
   router.post('/game-rooms', authenticate, playerOnly, async (request, response, next) => {
     const parsed = roomCreateSchema.safeParse(request.body);
@@ -75,9 +135,14 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
       const input = parsed.data;
       const sport = await prisma.sport.findFirst({ where: { id: input.sportId, isActive: true }, select: { id: true } });
       if (!sport) throw new HttpError(400, 'INVALID_SPORT', 'The selected sport is unavailable.');
+      let vendorUserId: string | null = null;
       if (input.venueId) {
-        const venue = await prisma.venue.findFirst({ where: { id: input.venueId, deletedAt: null, published: true }, select: { id: true } });
+        const venue = await prisma.venue.findFirst({
+          where: { id: input.venueId, deletedAt: null, published: true },
+          select: { id: true, vendorProfile: { select: { ownerUserId: true } } },
+        });
         if (!venue) throw new HttpError(404, 'VENUE_NOT_FOUND', 'The venue was not found.');
+        vendorUserId = venue.vendorProfile.ownerUserId;
       }
       let totalCostPaisa = 0;
       if (input.courtId) {
@@ -99,7 +164,7 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
           members: { create: { userId: request.auth!.userId, role: 'ORGANIZER', seatIndex: 0 } },
           conversation: { create: {
             kind: 'GAME_ROOM', title: input.title,
-            members: { create: { userId: request.auth!.userId } },
+            members: { create: [...new Set([request.auth!.userId, vendorUserId].filter((id): id is string => Boolean(id)))].map(userId => ({ userId })) },
           } },
         }, include: roomInclude,
       });
@@ -219,22 +284,9 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
     try {
       const rows = await prisma.conversation.findMany({
         where: { members: { some: { userId: request.auth!.userId } } },
-        include: {
-          members: { include: { user: { select: { id: true, name: true, role: true } } } },
-          messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1, include: { sender: { select: { id: true, name: true } } } },
-          gameRoom: { select: { id: true, visibility: true, status: true } },
-          tournament: { select: { id: true, status: true } },
-        }, orderBy: { updatedAt: 'desc' },
+        include: conversationInclude, orderBy: { updatedAt: 'desc' },
       });
-      response.status(200).json(apiSuccess(rows.map(row => ({
-        id: row.id, kind: row.kind, title: row.title, updatedAt: row.updatedAt.toISOString(),
-        members: row.members.map(member => member.user),
-        lastMessage: row.messages[0] ? {
-          id: row.messages[0].id, body: row.messages[0].body, senderUserId: row.messages[0].senderUserId,
-          senderName: row.messages[0].sender.name, createdAt: row.messages[0].createdAt.toISOString(),
-        } : null,
-        gameRoom: row.gameRoom, tournament: row.tournament,
-      }))));
+      response.status(200).json(apiSuccess(rows.map(conversationDto)));
     } catch (error) { next(error); }
   });
 

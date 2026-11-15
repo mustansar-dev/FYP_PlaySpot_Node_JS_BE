@@ -1,0 +1,100 @@
+import express from 'express';
+import request from 'supertest';
+import { describe, expect, it, vi } from 'vitest';
+import type { PrismaClient } from '../../generated/prisma/client.js';
+import { errorHandler } from '../../middleware/errorHandler.js';
+import { createAccessToken } from '../auth/tokens.js';
+import { RealtimeHub } from '../../realtime/hub.js';
+import { createCommunityRouter } from './router.js';
+
+const accessSecret = 'community-test-access-secret-long-enough';
+const playerId = '11111111-1111-4111-8111-111111111111';
+const vendorId = '22222222-2222-4222-8222-222222222222';
+const venueId = '33333333-3333-4333-8333-333333333333';
+const sportId = '44444444-4444-4444-8444-444444444444';
+const conversationId = '55555555-5555-4555-8555-555555555555';
+
+function setup() {
+  let lastGameRoomCreateData: Record<string, unknown> | null = null;
+  const venue = {
+    id: venueId, name: 'PlaySpot Arena', city: 'Lahore',
+    vendorProfile: { ownerUserId: vendorId },
+  };
+  const conversation = {
+    id: conversationId, kind: 'VENUE_VENDOR', title: 'PlaySpot Arena · venue chat',
+    updatedAt: new Date('2026-11-15T10:00:00.000Z'), venue,
+    members: [
+      { user: { id: playerId, name: 'Player One', role: 'PLAYER' } },
+      { user: { id: vendorId, name: 'Venue Owner', role: 'VENDOR' } },
+    ], messages: [], gameRoom: null, tournament: null,
+  };
+  const prisma = {
+    user: { findUnique: vi.fn(async () => ({ id: playerId, role: 'PLAYER', status: 'ACTIVE' })) },
+    venue: {
+      findFirst: vi.fn(async () => ({ id: venueId, name: venue.name, vendorProfile: venue.vendorProfile })),
+    },
+    sport: { findFirst: vi.fn(async () => ({ id: sportId })) },
+    court: { findFirst: vi.fn(async () => null) },
+    conversation: {
+      findFirst: vi.fn(async () => null),
+      create: vi.fn(async () => conversation),
+    },
+    gameRoom: {
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        lastGameRoomCreateData = data;
+        return {
+          id: conversationId, title: 'Badminton tonight', locationLabel: 'PlaySpot Arena',
+          startsAt: new Date(Date.now() + 3_600_000), endsAt: new Date(Date.now() + 7_200_000),
+          timeZone: 'Asia/Karachi', visibility: 'PUBLIC', capacity: 4, totalCostPaisa: 0,
+          perPlayerSharePaisa: 0, paymentMode: 'PAY_AT_VENUE', status: 'OPEN', createdAt: new Date(),
+          organizerUserId: playerId, sport: { id: sportId, name: 'Badminton', code: 'badminton' },
+          venue: { ...venue, vendorProfile: venue.vendorProfile }, court: null,
+          members: [{ userId: playerId, role: 'ORGANIZER', seatIndex: 0, user: { id: playerId, name: 'Player One' } }],
+        };
+      }),
+    },
+    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma)),
+    $queryRaw: vi.fn(async () => []),
+  };
+  const app = express();
+  app.use(express.json());
+  app.use('/api/v1', createCommunityRouter({ prisma: prisma as unknown as PrismaClient, accessSecret, realtime: new RealtimeHub() }));
+  app.use(errorHandler);
+  const token = createAccessToken(playerId, 'PLAYER', accessSecret);
+  return { app, token, prisma, getLastGameRoomCreateData: () => lastGameRoomCreateData };
+}
+
+describe('community venue conversations', () => {
+  it('creates a persisted private venue chat with the authenticated player and the venue owner', async () => {
+    const { app, token, prisma } = setup();
+    const response = await request(app).post(`/api/v1/venues/${venueId}/conversations`)
+      .set('Authorization', `Bearer ${token}`).send({});
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      id: conversationId, kind: 'VENUE_VENDOR', venueId, vendorUserId: vendorId, playerUserId: playerId,
+      members: [{ id: playerId }, { id: vendorId }],
+    });
+    expect(prisma.conversation.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        kind: 'VENUE_VENDOR', venueId,
+        members: { create: [{ userId: playerId }, { userId: vendorId }] },
+      }),
+    }));
+  });
+
+  it('includes the selected venue vendor in a game room conversation', async () => {
+    const { app, token, getLastGameRoomCreateData } = setup();
+    const startsAt = new Date(Date.now() + 3_600_000).toISOString();
+    const endsAt = new Date(Date.now() + 7_200_000).toISOString();
+    await request(app).post('/api/v1/game-rooms').set('Authorization', `Bearer ${token}`).send({
+      sportId, venueId, title: 'Badminton tonight', locationLabel: 'PlaySpot Arena',
+      startsAt, endsAt, capacity: 4, visibility: 'PUBLIC', paymentMode: 'PAY_AT_VENUE',
+    }).expect(201);
+
+    const createData = getLastGameRoomCreateData() as {
+      conversation: { create: { members: { create: Array<{ userId: string }> } } };
+    };
+    expect(createData.conversation.create.members.create).toEqual([{ userId: playerId }, { userId: vendorId }]);
+  });
+});

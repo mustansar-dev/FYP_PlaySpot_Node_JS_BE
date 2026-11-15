@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient } from '../../generated/prisma/client.js';
+import { Prisma } from '../../generated/prisma/client.js';
 import { paisaToPKR } from '../bookings/service.js';
 
 export const paymentDetailsInclude = {
@@ -61,7 +61,7 @@ export function paymentDto(payment: PaymentDetails, includeCheckoutUrl = false) 
   };
 }
 
-export async function reconcileBookingPaymentState(tx: Prisma.TransactionClient, bookingId: string, now = new Date()): Promise<void> {
+export async function reconcileBookingPaymentState(tx: Prisma.TransactionClient, bookingId: string): Promise<void> {
   const booking = await tx.booking.findUnique({
     where: { id: bookingId }, select: { id: true, status: true, totalPaisa: true, paymentStatus: true },
   });
@@ -110,12 +110,11 @@ export async function reconcileBookingPaymentState(tx: Prisma.TransactionClient,
   await tx.booking.update({ where: { id: bookingId }, data: {
     paymentStatus: hasOpenPayment ? 'PENDING' : hasRejectedOrFailed ? 'FAILED' : 'PENDING',
   } });
-  void now;
 }
 
 export async function markContributionPaid(tx: Prisma.TransactionClient, payment: {
   contributionId: string | null; bookingId: string | null; amountPaisa: number;
-}, now = new Date()): Promise<string | null> {
+}): Promise<string | null> {
   if (!payment.contributionId) return payment.bookingId;
   const contribution = await tx.paymentContribution.findUnique({
     where: { id: payment.contributionId },
@@ -163,7 +162,7 @@ export async function transitionPaymentInTransaction(tx: Prisma.TransactionClien
 
   const booking = relatedBooking(current);
   if (successTransition) {
-    await markContributionPaid(tx, { contributionId: current.contributionId, bookingId: current.bookingId, amountPaisa: current.amountPaisa }, now);
+    await markContributionPaid(tx, { contributionId: current.contributionId, bookingId: current.bookingId, amountPaisa: current.amountPaisa });
   } else if (current.contributionId) {
     const contribution = await tx.paymentContribution.findUnique({
       where: { id: current.contributionId },
@@ -177,7 +176,7 @@ export async function transitionPaymentInTransaction(tx: Prisma.TransactionClien
   }
 
   const bookingId = booking?.id ?? current.bookingId;
-  if (bookingId) await reconcileBookingPaymentState(tx, bookingId, now);
+  if (bookingId) await reconcileBookingPaymentState(tx, bookingId);
   const fresh = await tx.payment.findUnique({ where: { id: payment.id }, include: paymentDetailsInclude });
   if (!fresh) throw new Error('PAYMENT_NOT_FOUND');
   return { payment: fresh, changed: true };

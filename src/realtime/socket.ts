@@ -40,6 +40,7 @@ export function attachSocketServer(input: {
   });
 
   io.on('connection', socket => {
+    void socket.join(`user:${socket.data.userId}`);
     socket.on('chat:join', async (payload: unknown, callback?: unknown) => {
       const conversationId = typeof payload === 'object' && payload !== null && 'conversationId' in payload
         ? (payload as { conversationId?: unknown }).conversationId : undefined;
@@ -75,6 +76,9 @@ export function attachSocketServer(input: {
 
   input.realtime.on('chat:message:new', (event: { conversationId: string; message: unknown }) => {
     io.to(`conversation:${event.conversationId}`).emit('chat:message:new', event.message);
+  });
+  input.realtime.on('notification:new', (event: { userId: string; notification: unknown }) => {
+    io.to(`user:${event.userId}`).emit('notification:new', event.notification);
   });
   return io;
 }

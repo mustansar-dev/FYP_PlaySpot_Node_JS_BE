@@ -58,6 +58,7 @@ async function main(): Promise<void> {
     },
     community: { prisma, accessSecret: config.JWT_ACCESS_SECRET!, realtime },
     analytics: { prisma, accessSecret: config.JWT_ACCESS_SECRET! },
+    notifications: { prisma, accessSecret: config.JWT_ACCESS_SECRET! },
   });
   const server = createServer(app);
   const socketServer = attachSocketServer({ server, prisma, accessSecret: config.JWT_ACCESS_SECRET!, allowedOrigins: config.allowedOrigins, realtime });

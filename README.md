@@ -1,28 +1,29 @@
 # PlaySpot PK Backend
 
-PlaySpot PK is a React Native sports-venue booking and matchmaking app. This repository contains the API foundation, Prompt 1 authentication/profile endpoints, and Prompt 2 vendor venue/catalog/media/review endpoints. Booking, payments and community endpoints remain unimplemented.
+PlaySpot PK is a React Native sports venue booking and matchmaking app. This backend provides authenticated player/vendor APIs for accounts, venues, courts, discovery, availability, bookings and walk-ins, payment workflows, game rooms, persisted chat, tournaments, leaderboards and vendor analytics. The React Native app uses the API for live account and domain data; only JWT session credentials remain in local storage. Database-backed operation still requires a configured PostgreSQL/PostGIS database.
 
 ## Project and working state
 
 - Frontend: [FYP_PlaySpot_React_Native_FE](https://github.com/mustansar-dev/FYP_PlaySpot_React_Native_FE).
 - Frontend checkout inspected for this foundation: `/home/ibrahim/rn_lab_workspace/FYP_PlaySpot_React_Native_FE`. This path is machine-specific; use the repository URL on another computer.
+- Team: Ibrahim Sattar (BSSE23004), Mustansar (BSSE23027), Hasham (BSSE23053).
 - Backend runtime: Node.js 22 with npm. This machine has Node `v22.17.0` and npm `10.9.2`; Prisma 7.10.1 supports Node 22.12+.
-- Current backend checkout for Prompt 2: `feature/auth-booking`. Prompt 2 names `feature/vendor-venue-maps`, but neither that branch nor `develop` exists in the available branch refs. This session preserved the active branch; repository metadata is read-only in the current workspace, so the changes are not committed here.
-- Two supplied planning prompts are present as untracked files in this checkout. They are task inputs and are intentionally not copied into this README or altered.
+- Current integration checkouts: backend `frontend-integration`, frontend `backend-integration`. The current branches and working-tree state were preserved; no branch switch, reset, rebase or push was performed.
+- The updated backend week plan and prompt pack were read for this release pass; their contents are not duplicated here.
 - Exactly one README is maintained in this repository: this root file. Setup, contract, schema, decisions and limitations stay here.
 
 ## Completed scope
 
-1. Inspect the current frontend's routes, forms, Redux/local-storage services and demo data, then record screen-to-API requirements below.
-2. Implement only the backend foundation: validated configuration, Express app, liveness/readiness health routes, Prisma schema, PostGIS/exclusion-constraint migration and idempotent reference-data seed.
-3. Validate the schema/client and run typecheck, lint, tests and build.
-4. Prompt 1 adds player/vendor registration, login, refresh rotation, logout/revocation, current-user/profile routes, vendor profile onboarding/status and role guards.
-5. Do not apply a migration to a shared database until the team-approved development target and credentials are configured. No Supabase connection URL or credentials were present during this work; local PostgreSQL has no PostGIS extension installed.
-6. Prompt 2 adds vendor-owned venue, court, equipment and media management; public venue discovery/detail/reviews; parameterized PostGIS nearby search; and completed-booking review eligibility. It uses the existing schema and adds no migration.
+1. The backend has validated Express/Prisma configuration, liveness/readiness routes, a PostgreSQL/PostGIS schema, booking overlap constraints and an idempotent reference-data seed.
+2. Authentication provides player/vendor registration, login, refresh rotation, logout/revocation, profile routes and role/ownership checks.
+3. Venue APIs provide vendor-owned venue/court/equipment/media operations, public discovery/detail/reviews and parameterized PostGIS nearby search.
+4. Booking APIs provide availability, server-priced reservations, walk-ins on the shared court calendar, history, cancellation and payment contributions. Payment routes provide safeguarded Safepay Sandbox or a development-only simulation, pay-at-venue, bank-transfer instructions/receipt review and vendor collection controls.
+5. Community APIs provide public/private rooms, persisted member-checked chat, tournaments, leaderboards and vendor analytics. Socket.IO authenticates with the same JWT and REST remains the history/send fallback.
+6. Prompt 6 connects high-priority React Native account, discovery, booking, community and analytics flows to these APIs. Exact limitations are listed below. No local database migration or seed was applied in this QA pass because this checkout has no backend `.env`, this PostgreSQL role cannot create a separate database, and PostGIS is unavailable on the installed server.
 
 ## Frontend audit
 
-The inspected frontend is a bare React Native CLI application (`react-native` 0.86.2, React 19.2.3) using React Navigation native stack, Redux Toolkit and AsyncStorage. It has no API client, `fetch`/Axios calls, OpenAPI client or backend DTO package yet. Current screen operations use in-memory Redux state initialized from fixtures and local AsyncStorage.
+The inspected frontend is a bare React Native CLI application (`react-native` 0.86.2, React 19.2.3) using React Navigation native stack, Redux Toolkit and AsyncStorage. `src/services/apiClient.js` owns the configurable fetch client, bearer token, refresh rotation, response parsing and session expiry. Live builds default to the backend; AsyncStorage stores the JWT session only, while demo account/domain persistence is explicitly enabled only in tests or when `__PLAYSPOT_DEMO_MODE__` is set. Redux holds the in-memory view cache in backend mode, with no silent fixture fallback after network failures.
 
 ### Screen-to-API contract
 
@@ -69,7 +70,7 @@ Error response:
 {"success":false,"error":{"code":"VALIDATION_ERROR","message":"The request is invalid.","details":[]}}
 ```
 
-The API implements liveness/readiness, authentication/profile, venue/catalog/media/reviews, availability/bookings/walk-ins, payments, rooms/chat, tournaments/leaderboards and vendor analytics. Notifications have no backend route and remain unavailable in backend mode. `GET /api/v1/sports` exposes the active reference sports (`id`, `name`, `code`) for room/tournament requests.
+The API implements liveness/readiness, authentication/profile, venue/catalog/media/reviews, availability/bookings/walk-ins, payments, rooms/chat, tournaments/leaderboards, vendor analytics and persisted in-app chat notifications. `GET /api/v1/sports` exposes active reference sports (`id`, `name`, `code`) for room/tournament requests. Push notifications are not configured.
 
 | Group | Proposed routes | Auth |
 |---|---|---|
@@ -77,12 +78,12 @@ The API implements liveness/readiness, authentication/profile, venue/catalog/med
 | Venues/catalog | `GET /amenities`, `GET /venues`, `GET /venues/nearby`, `GET /venues/:venueId`, `GET /vendors/me/venues`, `POST /venues`, `PATCH/DELETE /venues/:venueId` | Public reads; owning vendor writes |
 | Courts/equipment | `GET/POST /venues/:venueId/courts`, `PATCH/DELETE /venues/:venueId/courts/:courtId`, `GET/POST /venues/:venueId/equipment`, `PATCH/DELETE /venues/:venueId/equipment/:equipmentId` | Public reads for published venues; owning vendor writes |
 | Media/reviews | `POST /venues/:venueId/media/signed-upload`, `POST /venues/:venueId/media/confirm`, `DELETE /venues/:venueId/media/:mediaId`, `GET /venues/:venueId/reviews`, `POST/PATCH /venues/:venueId/reviews` | Vendor owner for media; public review read; completed-booking player create/edit |
-| Availability/booking | `GET /courts/:courtId/availability?date=...` and booking routes | Proposed; Prompt 3 |
+| Availability/booking | `GET /courts/:courtId/availability?date=...`, booking read/create/cancel, vendor list and walk-in routes | Authenticated player or owning vendor |
 | Booking | `POST /bookings`, `GET /bookings/me`, `GET /bookings/:bookingId`, `POST /bookings/:bookingId/cancel`, `GET /vendors/me/bookings`, `POST /vendors/me/bookings/walk-in` | Player or owning vendor |
-| Payment | `POST /bookings/:bookingId/contributions`, `POST /payments/:paymentId/checkout`, `GET /payments/:paymentId`, `POST /webhooks/safepay` | Authenticated payer; webhook signature verified |
-| Rooms/chat | `POST/GET /game-rooms`, `GET /game-rooms/:id`, `POST/DELETE /game-rooms/:id/members/me`, `GET /conversations`, `GET/POST /conversations/:id/messages` | Authenticated; membership checked per room/conversation |
+| Payment | `POST /bookings/:bookingId/contributions`, `POST /payments/:paymentId/checkout`, `GET /payments/:paymentId`, `POST /webhooks/safepay`, vendor payment instructions, venue cash confirmation, bank receipt upload/confirm and transfer approve/reject | Authenticated payer or owning vendor; webhook signature verified; simulation is development-only |
+| Rooms/chat | `POST/GET /game-rooms`, `GET /game-rooms/:id`, `POST/DELETE /game-rooms/:id/members/me`, `POST /venues/:venueId/conversations`, `GET /conversations`, `GET/POST /conversations/:id/messages` | Authenticated; membership checked per room/conversation; the selected venue provider joins its room chat |
 | Tournaments/leaderboard | `GET/POST /tournaments`, `GET/PATCH /tournaments/:id`, `POST/DELETE /tournaments/:id/teams/me`, `PUT /tournaments/:id/standings`, `GET /tournaments/:id/leaderboard`, `GET /leaderboards` | Public list/read as decided; host/player writes |
-| Analytics/notifications/media | `GET /vendors/me/analytics`, `GET /notifications`, `PATCH /notifications/:id/read`, `POST /media/signed-upload`, `POST /media/confirm` | Authenticated; vendor ownership on records |
+| Analytics/notifications/media | `GET /vendors/me/analytics`, `GET /notifications`, `PATCH /notifications/:id/read`, `POST /notifications/read-all`, `POST /media/signed-upload`, `POST /media/confirm` | Authenticated; notification reads are owner-scoped; media checks ownership |
 
 ### DTO conventions
 
@@ -161,7 +162,7 @@ Keep the project a modular monolith; add a route/service/repository when its fea
 6. **Authentication:** forgot-password UI expressly says no email/OTP is sent. This foundation does not implement OTP or claim email delivery. Player/vendor registration is connected to the API; vendor onboarding sends its nested venue, court and equipment draft sequentially. OTP/password recovery is not implemented.
 7. **Legacy local data:** current frontend seeds fictional local venues, sample bookings, conversations, tournaments and leaderboards. the Prompt 6 mobile integration now switches these flows to API responses outside explicit demo mode; do not copy fixture rows into the shared database as real providers/customers.
 8. **Prompt 2 schema limits:** the shared schema has no equipment description or venue/court capacity column. Prompt 2 leaves those fields out rather than editing schema/migrations, as required. The editor currently does not send capacity.
-9. **Branch safety:** Prompt 2 expects `feature/vendor-venue-maps` based on `develop`; this checkout only has `feature/auth-booking` and no `develop` ref. Changes remain on the active branch and uncommitted in this workspace.
+9. **Branch safety:** this QA pass preserved the active `backend-integration` and `frontend-integration` branches and all pre-existing worktree changes. No remote branches were merged or pushed.
 
 ## Prompt 6 mobile integration status
 
@@ -173,12 +174,12 @@ The mobile client lives in the sibling repository `FYP_PlaySpot_React_Native_FE`
 | Venue onboarding and catalog | `/venues`, `/venues/:id`, `/venues/:id/courts`, `/venues/:id/equipment`, `/amenities`, signed media routes | Vendor registration creates draft venue/courts/equipment sequentially. Selected local media URIs are not uploaded yet; UI must disclose this. Venue image upload needs a server signed upload URL and binary PUT before media confirmation. |
 | Discovery and availability | `/venues`, `/venues/nearby`, `/courts/:courtId/availability?date=` | Search, the schematic map and room venue suggestions query the backend. Search accepts manual coordinates. There is no GPS/map SDK; no map package is added. Availability is fetched per selected court/date. |
 | Bookings and walk-ins | `POST /bookings`, `/bookings/me`, `/bookings/:id`, `/bookings/:id/cancel`, `/vendors/me/bookings`, `/vendors/me/bookings/walk-in` | Booking and walk-in create/cancel call the server; availability and conflicts are authoritative server-side. Never treat app state as proof a slot is reserved. |
-| Payment | `/payments/:id/checkout`, `/payments/:id`, booking payment instructions and vendor confirmation routes | Booking method is sent to the backend. Online checkout opens only a server-returned URL; redirects never set paid state. Automatic post-checkout status refresh and booking payment ID persistence across app restart still need a server DTO addition. Safepay needs approved credentials; transfer receipt and vendor payment review screens are not connected. |
-| Rooms and chat | `/sports`, `/game-rooms`, `/conversations`, `/conversations/:id/messages` and Socket.IO events | Public room creation/list/detail/join/leave/close, availability suggestions, REST history and Socket.IO send/receive are connected. Server rooms do not create a court booking or block the booking availability table, so a room's venue time is not protected against a concurrent booking. Private codes are returned only at creation and are not recoverable after app restart. Venue-vendor conversation creation is not exposed by the backend. |
+| Payment | `/payments/:id/checkout`, `/payments/:id`, booking payment instructions and vendor confirmation routes | Booking method is sent to the backend. Online checkout opens only a server-returned URL; redirects never set paid state. The booking list refetches server status when opened and when the app resumes from the provider. Local development simulation is labelled and uses the development-only server route. Safepay needs approved credentials; transfer receipt and vendor payment review screens are not connected. |
+| Rooms and chat | `/sports`, `/game-rooms`, `/venues/:venueId/conversations`, `/conversations`, `/conversations/:id/messages` and Socket.IO events | Public/private room membership, vendor participation in room chat, direct venue-vendor conversation creation, REST history and Socket.IO send/receive are connected. Chat messages create persisted notifications and a `notification:new` event. A room with a selected court still does not create a booking or block the booking availability table. Private codes are returned only at creation and are not recoverable after app restart. |
 | Tournaments and leaderboards | `/sports`, `/tournaments`, team registration/withdrawal, standings, tournament/global leaderboards | Create/list/detail/register/withdraw/cancel/standings/global leaderboard are connected. Tournament entry payment is not connected: registration is recorded as pending and the UI must not imply money was collected. Tournament creation does not reserve court bookings. |
 | Vendor analytics | `/vendors/me/analytics?from=&to=` | The dashboard displays the backend's selected-period booking, verified revenue and occupancy totals; it hides fixture history in backend mode. |
 
-The only backend contract addition made for frontend integration is the read-only `/sports` reference route; it adds no schema or migration. Chat realtime uses Socket.IO authentication with `auth: { token: accessToken }`, `chat:join` payload `{ conversationId }`, `chat:message` payload `{ conversationId, body }`, and receives `chat:message:new`. REST message history remains the initial-load/recovery path. Notifications, binary media upload, tournament/room slot reservation and full bank-transfer review UI are not integrated. Payments, Supabase media storage and live database flows cannot be demonstrated without the team's approved credentials and a reachable database.
+The integration adds the read-only `/sports` reference route, persisted chat notifications and `POST /venues/:venueId/conversations`; these changes add no schema migration. Chat realtime uses Socket.IO authentication with `auth: { token: accessToken }`, `chat:join` payload `{ conversationId }`, `chat:message` payload `{ conversationId, body }`, and receives `chat:message:new` plus `notification:new`. REST history and notification reads remain the recovery path. In-app chat notifications are stored in PostgreSQL and marked read through authenticated endpoints; there is no push-notification provider. Binary media upload, tournament/room slot reservation and complete bank-transfer review screens are still not integrated. Payments, Supabase media storage and live database flows cannot be demonstrated without approved credentials and a reachable PostGIS database.
 
 ## Environment and commands
 
@@ -220,26 +221,24 @@ For Android Emulator access to a development host, Android's standard emulator h
 | `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Yes outside tests | Independent random secrets, at least 32 characters each. Server startup fails when either is missing or short. Refresh token digests use the refresh secret; JWT access tokens use the access secret. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` | Optional for API startup; required for venue media | Server-side signed upload, object verification and deletion. Keep the service role key on the backend. Configure the bucket for public reads because venue DTOs return public media URLs. |
 | `GEOAPIFY_API_KEY` | Optional/not used by current routes | No geocoding endpoint is exposed; vendors can submit manually selected coordinates. |
-| `SAFEPAY_ENV`, `SAFEPAY_SECRET_KEY`, `SAFEPAY_API_KEY`, `SAFEPAY_WEBHOOK_SECRET`, `SAFEPAY_RETURN_URL`, `SAFEPAY_CANCEL_URL` | Later | Safepay sandbox; no live payment is enabled in this foundation. |
+| `PAYMENT_PROVIDER` | No | `.env.example` selects `development_mock` for a local-only, clearly labelled payment simulation. Production startup rejects this adapter. |
+| `SAFEPAY_ENV`, `SAFEPAY_SECRET_KEY`, `SAFEPAY_API_KEY`, `SAFEPAY_WEBHOOK_SECRET`, `SAFEPAY_RETURN_URL`, `SAFEPAY_CANCEL_URL` | Required when `PAYMENT_PROVIDER=safepay` | Safepay Sandbox only; sandbox credentials must be supplied before hosted checkout can run. No live payment configuration is supported. |
 
-## Verification results
+## Prompt 7 verification results
 
-- `npm ci` — passed from the lockfile (413 packages). A local placeholder `DATABASE_URL` was used for Prisma configuration; install/generation did not connect to a database.
-- `npm test` — Prompt 2 verification passed: 6 files / 31 tests, including venue ownership, coordinate validation, amenity filters/pagination, PostGIS parameter order/distance mapping, media authorization/object verification, review eligibility/duplicates and the existing auth/foundation tests.
-- `npm run typecheck` — passed.
-- `npm run lint` — passed.
-- `npm run build` — passed.
-- `DATABASE_URL=postgresql://local:local@127.0.0.1:5432/playspot_dev npm run prisma:validate` — passed after Prompt 2; schema remains unchanged.
-- `DATABASE_URL=postgresql://local:local@127.0.0.1:5432/playspot_dev npm run prisma:generate` — passed after installing from the existing lockfile.
-- `DATABASE_URL=postgresql://playspot:local-only@localhost:5432/playspot_dev npm run prisma:validate` — passed.
-- `DATABASE_URL=postgresql://playspot:local-only@localhost:5432/playspot_dev npm run prisma:generate` — passed; Prisma Client 7.10.1 generated into the ignored `src/generated/prisma` directory.
-- `DATABASE_URL=postgresql://playspot:local-only@localhost:5432/playspot_dev npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script --output prisma/migrations/20261110000000_initial/migration.sql` — passed; the checked-in migration then adds the PostGIS/btree_gist setup, GiST index and custom check/exclusion constraints.
-- `npm audit --omit=dev --audit-level=moderate` — passed with 0 production dependency vulnerabilities. Full `npm audit` reports 7 moderate advisories in the development-only TypeScript ESLint/minimatch chain; no forced major downgrade was applied.
-- Built-server smoke test with a deliberately non-working local URL: `GET /health` returned 200, `GET /api/v1/health` returned 503 with `DATABASE_UNAVAILABLE`, and an unimplemented route returned the standard 404 envelope. This confirms liveness is separate from readiness and no fake DB success is returned.
+- Backend `npm ci` — passed from the lockfile (454 packages). The Safepay SDK pins an old Axios range; a scoped npm override uses Axios 1.21.1. Its `axios.request` call remains compatible and the provider tests pass.
+- Backend `npm test` — passed: 14 files / 60 tests, including chat notification persistence, venue chat membership and notification ownership/read-state routes.
+- Backend `npm run typecheck`, `npm run lint`, `npm run build` — passed.
+- Backend `npm audit --omit=dev --audit-level=moderate` — passed with 0 production dependency vulnerabilities. Full audit still reports 7 moderate issues in development-only lint tooling; no forced toolchain upgrade was applied.
+- Backend `DATABASE_URL=postgresql://playspot:placeholder@127.0.0.1:5432/playspot_dev npm run prisma:validate` and `... npm run prisma:generate` — passed offline. The placeholder URL was not used to connect to a database.
+- Frontend `npm ci` — passed from the lockfile (729 packages). `npm audit fix` applied compatible fixes for `body-parser`, `joi` and `qs`; audit still reports moderate development-tool findings in `deepmerge` and `fast-xml-parser`, whose available fixes require out-of-range React Native CLI upgrades.
+- Frontend `npm test -- --runInBand --testTimeout=20000` — passed: 11 suites / 63 tests, including bearer-token, refresh-rotation and revoked-refresh API-client tests.
+- Frontend Android JS bundle — passed; Metro generated `/tmp/playspot-prompt7-final.bundle` and copied 24 assets.
+- Backend dev-server smoke — the API started with an isolated placeholder DB URL; `GET /health` returned 200, while `GET /api/v1/health` correctly returned 503 `DATABASE_UNAVAILABLE`. No database-backed requests could pass until the local PostGIS database is configured.
+- Android `./gradlew :app:assembleDebug` — passed. No emulator/device was connected, so the app was not installed or walked through interactively. The app's Android API URL defaults to emulator host `10.0.2.2`; physical devices need `__PLAYSPOT_API_BASE_URL__` set to a reachable LAN/tunnel address.
 - `git diff --check` — passed. `find . -name README.md -print` — exactly one result, `./README.md`.
-- **Not run for Prompt 2:** migration/deploy, seed, live PostGIS query or real Supabase Storage request. No approved database or Supabase credentials are configured. PostGIS SQL parameterization was tested with mocked Prisma raw-query calls; live DB verification remains for the approved development database.
-- **Runtime note:** this machine's Node is 22.17.0. Node 22.23.4 was the latest published 22.x LTS patch checked during Prompt 0; use a current supported Node 22 patch for shared development/deployment.
-- **Tooling note:** npm reports ESLint 9.39.5 as deprecated and the full dev-dependency audit contains 7 moderate TypeScript ESLint/minimatch findings. The ESLint 10 upgrade attempt hit peer-dependency resolution conflicts, so it was reverted rather than forcing a mismatched toolchain. Production dependency audit is clean; update the lint toolchain with a compatible parser/plugin set before release.
+- **Database-dependent checks still blocked:** no backend `.env`/`DATABASE_URL` is present, the local PostgreSQL login role cannot create a database, and this PostgreSQL 16 installation does not have PostGIS available. Migration status/deploy, seed, a successful DB readiness check, live PostGIS queries, and DB-backed player/vendor flow walkthroughs were not run; the readiness smoke correctly returned `503 DATABASE_UNAVAILABLE`. A local `playspot_dev` PostgreSQL database with PostGIS and its connection URL in this repository's ignored `.env` are required to complete those checks.
+- **Provider/media limitations:** no Safepay Sandbox keys, Supabase Storage credentials or vendor bank instructions were configured. No live provider transaction or storage upload was attempted. `.env.example` selects the explicit development mock so the app can demonstrate an online-style payment locally; the app labels it simulated, and the backend rejects it in production.
 
 ## Official implementation references
 
