@@ -5,6 +5,13 @@ const optionalUrl = z.preprocess(
   value => value === '' ? undefined : value,
   z.string().url().optional(),
 );
+const optionalPostgresUrl = z.preprocess(
+  value => value === '' ? undefined : value,
+  z.string().url().refine(
+    value => value.startsWith('postgresql://') || value.startsWith('postgres://'),
+    'The connection URL must use PostgreSQL',
+  ).optional(),
+);
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -15,6 +22,8 @@ const envSchema = z.object({
     value => value.startsWith('postgresql://') || value.startsWith('postgres://'),
     'DATABASE_URL must be a PostgreSQL connection URL',
   ),
+  MIGRATOR_DATABASE_URL: optionalPostgresUrl,
+  SHADOW_DATABASE_URL: optionalPostgresUrl,
   JWT_ACCESS_SECRET: z.string().optional(),
   JWT_REFRESH_SECRET: z.string().optional(),
   SUPABASE_URL: optionalUrl,
@@ -56,6 +65,10 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
   }
   if (result.data.NODE_ENV === 'production' && result.data.PAYMENT_PROVIDER === 'development_mock') {
     throw new Error('Invalid environment configuration: PAYMENT_PROVIDER=development_mock is not allowed in production.');
+  }
+
+  if (result.data.MIGRATOR_DATABASE_URL && result.data.DATABASE_URL === result.data.MIGRATOR_DATABASE_URL) {
+    throw new Error('Invalid environment configuration: DATABASE_URL and MIGRATOR_DATABASE_URL must use separate database roles.');
   }
 
   return { ...result.data, allowedOrigins };

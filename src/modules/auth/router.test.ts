@@ -21,7 +21,7 @@ function setup() {
       create: vi.fn(async ({ data }: { data: { role: string } }) => ({ ...user, role: data.role })),
       findFirst: vi.fn(async () => null), findUnique: vi.fn(async () => user), update: vi.fn(async () => user),
     },
-    sport: { findMany: vi.fn(async () => []) },
+    sport: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => null) },
     refreshToken: {
       create: vi.fn(async () => ({ id: 'token-1' })), findUnique: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })),
     },
@@ -51,6 +51,35 @@ describe('authentication routes', () => {
     expect(response.body.data.user).not.toHaveProperty('passwordHash');
     expect(response.body.data.accessToken).toBeTruthy();
     expect(prisma.user.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ role: 'PLAYER', email: 'player@example.com' }) }));
+  });
+
+  it('accepts every player-interest label used by the frontend when the seeded catalog exists', async () => {
+    const { app, prisma } = setup();
+    vi.mocked(prisma.sport.findMany).mockResolvedValueOnce([
+      { id: 'sport-futsal' }, { id: 'sport-cricket' }, { id: 'sport-padel' }, { id: 'sport-badminton' },
+    ] as never);
+    const response = await request(app).post('/api/v1/auth/register/player').send({
+      name: 'A Player', email: 'sports@example.com', password: 'secure-pass-123', confirmPassword: 'secure-pass-123',
+      preferredSports: ['Futsal', 'Cricket', 'Padel', 'Badminton'],
+    });
+
+    expect(response.status).toBe(201);
+    expect(prisma.user.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      preferredSports: { create: [{ sportId: 'sport-futsal' }, { sportId: 'sport-cricket' }, { sportId: 'sport-padel' }, { sportId: 'sport-badminton' }] },
+    }) }));
+  });
+
+  it('reports an actionable setup error when the sport reference table is empty', async () => {
+    const { app, prisma } = setup();
+    const response = await request(app).post('/api/v1/auth/register/player').send({
+      name: 'A Player', email: 'unseeded@example.com', password: 'secure-pass-123', confirmPassword: 'secure-pass-123',
+      preferredSports: ['Futsal'],
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body.error.code).toBe('SPORT_CATALOG_NOT_SEEDED');
+    expect(response.body.error.message).toContain('npm run setup');
+    expect(prisma.user.create).not.toHaveBeenCalled();
   });
 
   it('rejects a player from vendor profile routes using the persisted role', async () => {

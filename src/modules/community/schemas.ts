@@ -35,6 +35,7 @@ export const messageListQuerySchema = z.object({
 
 export const tournamentCreateSchema = z.object({
   venueId: uuid, sportId: uuid,
+  courtIds: z.array(uuid).min(1).max(50).refine(ids => new Set(ids).size === ids.length, 'Court IDs must be unique.'),
   title: z.string().trim().min(2).max(180), startsAt: dateTime, endsAt: dateTime,
   maxTeams: z.number().int().min(2).max(64), teamSize: z.number().int().min(1).max(50),
   entryFeePerPlayerPaisa: z.number().int().min(0).max(2_000_000_000),

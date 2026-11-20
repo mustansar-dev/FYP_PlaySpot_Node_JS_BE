@@ -24,6 +24,16 @@ export const paymentDetailsInclude = {
       court: { select: { id: true, name: true } },
     },
   },
+  tournamentParticipant: {
+    include: {
+      tournament: {
+        include: {
+          venue: { select: { id: true, name: true, city: true, vendorProfile: { select: { ownerUserId: true } } } },
+          organizer: { select: { id: true, name: true } },
+        },
+      },
+    },
+  },
   receipts: { orderBy: { submittedAt: 'desc' as const } },
 } satisfies Prisma.PaymentInclude;
 
@@ -33,10 +43,16 @@ export function relatedBooking(payment: PaymentDetails) {
   return payment.booking ?? payment.contribution?.bookingParticipant.booking ?? null;
 }
 
+export function relatedTournament(payment: PaymentDetails) {
+  return payment.tournamentParticipant?.tournament ?? null;
+}
+
 export function paymentDto(payment: PaymentDetails, includeCheckoutUrl = false) {
   return {
     id: payment.id,
     bookingId: payment.bookingId ?? payment.contribution?.bookingParticipant.bookingId ?? null,
+    tournamentId: payment.tournamentParticipant?.tournament.id ?? null,
+    tournamentParticipantId: payment.tournamentParticipantId,
     contributionId: payment.contributionId,
     method: payment.method,
     provider: payment.provider,
@@ -127,6 +143,11 @@ export async function markContributionPaid(tx: Prisma.TransactionClient, payment
   const status = amountPaidPaisa >= contribution.amountDuePaisa ? 'PAID' as const : 'PARTIALLY_PAID' as const;
   await tx.paymentContribution.update({ where: { id: contribution.id }, data: { amountPaidPaisa, status } });
   await tx.bookingParticipant.update({ where: { id: contribution.bookingParticipant.id }, data: { paymentStatus: status } });
+  const room = await tx.gameRoom.findUnique({ where: { bookingId: contribution.bookingParticipant.bookingId }, select: { id: true } });
+  if (room) await tx.gameRoomShare.updateMany({
+    where: { gameRoomId: room.id, userId: contribution.bookingParticipant.userId },
+    data: { status: status === 'PAID' ? 'PAID' : 'PENDING' },
+  });
   return contribution.bookingParticipant.bookingId;
 }
 
@@ -173,6 +194,13 @@ export async function transitionPaymentInTransaction(tx: Prisma.TransactionClien
       await tx.paymentContribution.update({ where: { id: contribution.id }, data: { status: contributionStatus } });
       await tx.bookingParticipant.update({ where: { id: contribution.bookingParticipant.id }, data: { paymentStatus: contributionStatus } });
     }
+  }
+
+  if (current.tournamentParticipantId) {
+    await tx.tournamentParticipant.update({
+      where: { id: current.tournamentParticipantId },
+      data: { paymentStatus: successTransition ? 'PAID' : 'FAILED' },
+    });
   }
 
   const bookingId = booking?.id ?? current.bookingId;

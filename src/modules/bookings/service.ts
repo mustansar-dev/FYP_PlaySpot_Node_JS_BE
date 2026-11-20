@@ -5,10 +5,13 @@ export const bookingDetailsInclude = {
   venue: { select: { name: true } },
   court: { select: { name: true } },
   items: true,
+  payments: { select: { id: true, userId: true, method: true, status: true, amountPaisa: true, purpose: true } },
   participants: {
     include: {
       user: { select: { id: true, name: true } },
-      contribution: { select: { id: true, amountDuePaisa: true, amountPaidPaisa: true, status: true } },
+      contribution: { include: {
+        payments: { select: { id: true, userId: true, method: true, status: true, amountPaisa: true, purpose: true } },
+      } },
     },
     orderBy: { joinedAt: 'asc' },
   },
@@ -80,6 +83,13 @@ export function bookingDto(booking: BookingDetails) {
         amountPaidPaisa: participant.contribution.amountPaidPaisa,
         status: participant.contribution.status,
       } : null,
+    })),
+    payments: [
+      ...booking.payments,
+      ...booking.participants.flatMap(participant => participant.contribution?.payments ?? []),
+    ].map(payment => ({
+      id: payment.id, userId: payment.userId, method: payment.method, status: payment.status,
+      amountPaisa: payment.amountPaisa, amountPKR: paisaToPKR(payment.amountPaisa), purpose: payment.purpose,
     })),
     createdAt: booking.createdAt.toISOString(),
   };

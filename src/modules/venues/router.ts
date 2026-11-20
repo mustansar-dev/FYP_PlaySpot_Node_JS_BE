@@ -125,6 +125,9 @@ export function createVenueRouter({ prisma, accessSecret, storage = new Unconfig
         where: { isActive: true }, orderBy: { name: 'asc' },
         select: { id: true, name: true, code: true },
       });
+      if (!items.length) {
+        throw new HttpError(503, 'SPORT_CATALOG_NOT_SEEDED', 'Sports are not initialized in this database. Run `npm run setup` in the backend project.');
+      }
       response.status(200).json(apiSuccess(items));
     } catch (error) { next(error); }
   });

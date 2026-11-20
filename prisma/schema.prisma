@@ -353,6 +353,7 @@ model Venue {
 
   @@index([vendorProfileId, deletedAt])
   @@index([city, published, deletedAt])
+  @@index([location], type: Gist, map: "venues_location_gist_idx")
   @@map("venues")
 }
 
@@ -585,6 +586,8 @@ model Payment {
   @@unique([userId, idempotencyKey])
   @@index([userId, createdAt])
   @@index([status, createdAt])
+  @@index([bookingId, createdAt], map: "payments_booking_id_created_at_idx")
+  @@index([contributionId, status], map: "payments_contribution_id_status_idx")
   @@map("payments")
 }
 

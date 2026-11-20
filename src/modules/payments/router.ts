@@ -8,7 +8,7 @@ import { expirePendingHolds } from '../bookings/service.js';
 import { PaymentGateway } from '../../integrations/payments/provider.js';
 import {
   paymentDetailsInclude, paymentDto, reconcileBookingPaymentState, relatedBooking, transitionPaymentInTransaction,
-  type PaymentDetails,
+  relatedTournament, type PaymentDetails,
 } from './service.js';
 import {
   cashReceiptSchema, contributionCreateSchema, mockPaymentResultSchema, paymentInstructionsSchema,
@@ -78,7 +78,23 @@ async function loadPayment(prisma: PrismaClient, paymentId: string): Promise<Pay
 
 function mayReadPayment(payment: PaymentDetails, userId: string, role: string): boolean {
   if (payment.userId === userId) return true;
-  return role === 'VENDOR' && relatedBooking(payment)?.venue.vendorProfile.ownerUserId === userId;
+  return role === 'VENDOR' && (
+    relatedBooking(payment)?.venue.vendorProfile.ownerUserId === userId
+    || relatedTournament(payment)?.organizerUserId === userId
+  );
+}
+
+function tournamentPaymentIsOpen(payment: PaymentDetails, now = new Date()): boolean {
+  const participant = payment.tournamentParticipant;
+  return Boolean(participant && participant.status === 'REGISTERED'
+    && participant.tournament.status === 'UPCOMING' && participant.tournament.startsAt > now);
+}
+
+function paymentTargetIsOpen(payment: PaymentDetails, now = new Date()): boolean {
+  const booking = relatedBooking(payment);
+  if (booking) return ['PENDING_PAYMENT', 'CONFIRMED'].includes(booking.status)
+    && (booking.status !== 'PENDING_PAYMENT' || !booking.holdExpiresAt || booking.holdExpiresAt > now);
+  return tournamentPaymentIsOpen(payment, now);
 }
 
 function paymentViewForCheckout(payment: PaymentDetails, checkoutUrl: string | null, simulation: boolean, message?: string) {
@@ -130,7 +146,8 @@ export function createPaymentRouter({
 
   async function requireVendorOwnedPayment(paymentId: string, vendorUserId: string): Promise<PaymentDetails> {
     const payment = await loadPayment(prisma, paymentId);
-    if (relatedBooking(payment)?.venue.vendorProfile.ownerUserId !== vendorUserId) {
+    if (relatedBooking(payment)?.venue.vendorProfile.ownerUserId !== vendorUserId
+      && relatedTournament(payment)?.organizerUserId !== vendorUserId) {
       throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
     }
     return payment;
@@ -143,7 +160,9 @@ export function createPaymentRouter({
       LEFT JOIN "payment_contributions" pc ON pc."id" = p."contribution_id"
       LEFT JOIN "booking_participants" bp ON bp."id" = pc."booking_participant_id"
       LEFT JOIN "bookings" participant_booking ON participant_booking."id" = bp."booking_id"
-      INNER JOIN "venues" v ON v."id" = COALESCE(direct_booking."venue_id", participant_booking."venue_id")
+      LEFT JOIN "tournament_participants" tp ON tp."id" = p."tournament_participant_id"
+      LEFT JOIN "tournaments" t ON t."id" = tp."tournament_id"
+      INNER JOIN "venues" v ON v."id" = COALESCE(direct_booking."venue_id", participant_booking."venue_id", t."venue_id")
       INNER JOIN "vendor_profiles" vp ON vp."id" = v."vendor_profile_id"
       WHERE vp."owner_user_id" = ${vendorUserId}::uuid
         AND p."method" = ${method}::"payment_method"
@@ -225,6 +244,59 @@ export function createPaymentRouter({
     } catch (error) { next(mapPaymentError(error)); }
   });
 
+  router.post('/tournaments/:tournamentId/teams/me/payments', authenticate, playerOnly, async (request, response, next) => {
+    const parsed = contributionCreateSchema.safeParse(request.body);
+    if (!parsed.success) { invalid(response, parsed.error.issues); return; }
+    try {
+      const tournamentId = routeId(request, 'tournamentId');
+      const result = await prisma.$transaction(async tx => {
+        await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "tournaments" WHERE "id" = ${tournamentId}::uuid FOR UPDATE`);
+        const participant = await tx.tournamentParticipant.findUnique({
+          where: { tournamentId_userId: { tournamentId, userId: request.auth!.userId } },
+          include: { tournament: true },
+        });
+        if (!participant || participant.status !== 'REGISTERED') throw new HttpError(404, 'TEAM_NOT_FOUND', 'Your registered team was not found.');
+        if (participant.tournament.status !== 'UPCOMING' || participant.tournament.startsAt <= new Date()) {
+          throw new HttpError(409, 'TOURNAMENT_NOT_PAYABLE', 'This tournament is no longer accepting entry payments.');
+        }
+        if (participant.paymentStatus === 'PAID') throw new HttpError(409, 'TOURNAMENT_ENTRY_ALREADY_PAID', 'This team entry has already been paid.');
+        if (!Number.isSafeInteger(participant.totalEntryFeePaisa) || participant.totalEntryFeePaisa <= 0) {
+          throw new HttpError(409, 'TOURNAMENT_ENTRY_NOT_PAYABLE', 'This team does not have an entry fee to pay.');
+        }
+
+        const method = parsed.data.method as PaymentMethod;
+        const existing = await tx.payment.findFirst({
+          where: { tournamentParticipantId: participant.id, status: { in: [...ACTIVE_PAYMENT_STATUSES] } },
+          orderBy: { createdAt: 'desc' }, include: paymentDetailsInclude,
+        });
+        if (existing) {
+          if (existing.method !== method) throw new HttpError(409, 'PAYMENT_METHOD_LOCKED', 'An active entry payment already exists with a different method.');
+          return { payment: existing, created: false };
+        }
+
+        const status = method === 'ONLINE' ? 'PENDING' as const
+          : method === 'PAY_AT_VENUE' ? 'DUE_AT_VENUE' as const : 'AWAITING_TRANSFER' as const;
+        const payment = await tx.payment.create({ data: {
+          userId: request.auth!.userId,
+          provider: method === 'ONLINE' ? gateway.provider : 'MANUAL', method,
+          environment: method === 'ONLINE' ? gateway.environment : 'MANUAL',
+          purpose: 'TOURNAMENT_ENTRY', status, amountPaisa: participant.totalEntryFeePaisa, currency: 'PKR',
+          tournamentParticipantId: participant.id,
+          idempotencyKey: `tournament-entry:${participant.id}:${randomUUID()}`,
+        } });
+        await tx.tournamentParticipant.update({ where: { id: participant.id }, data: { paymentStatus: 'PENDING' } });
+        if (method !== 'ONLINE') await tx.paymentStatusAudit.create({ data: {
+          paymentId: payment.id, actorUserId: request.auth!.userId, previousStatus: null, newStatus: status,
+          amountPaisa: payment.amountPaisa, reason: method === 'PAY_AT_VENUE' ? 'TOURNAMENT_ENTRY_DUE_AT_VENUE' : 'TOURNAMENT_ENTRY_BANK_TRANSFER_SELECTED',
+        } });
+        const detailed = await tx.payment.findUnique({ where: { id: payment.id }, include: paymentDetailsInclude });
+        if (!detailed) throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
+        return { payment: detailed, created: true };
+      });
+      response.status(result.created ? 201 : 200).json(apiSuccess({ payment: paymentDto(result.payment) }));
+    } catch (error) { next(mapPaymentError(error)); }
+  });
+
   router.post('/payments/:paymentId/checkout', authenticate, async (request, response, next) => {
     try {
       const paymentId = routeId(request, 'paymentId');
@@ -239,11 +311,8 @@ export function createPaymentRouter({
       }
       if (existing.status !== 'PENDING') throw new HttpError(409, 'PAYMENT_NOT_PENDING', 'This payment is no longer awaiting online checkout.');
       const booking = relatedBooking(existing);
-      if (!booking || !['PENDING_PAYMENT', 'CONFIRMED'].includes(booking.status)) {
-        throw new HttpError(409, 'BOOKING_NOT_PAYABLE', 'The booking is no longer accepting payment.');
-      }
-      if (booking.status === 'PENDING_PAYMENT' && booking.holdExpiresAt && booking.holdExpiresAt <= new Date()) {
-        throw new HttpError(409, 'BOOKING_HOLD_EXPIRED', 'The booking hold has expired.');
+      if (!paymentTargetIsOpen(existing)) {
+        throw new HttpError(409, booking ? 'BOOKING_NOT_PAYABLE' : 'TOURNAMENT_NOT_PAYABLE', 'This payment target is no longer accepting payment.');
       }
       if (existing.checkoutUrl && existing.providerReference) {
         response.status(200).json(apiSuccess(paymentViewForCheckout(existing, existing.checkoutUrl, false)));
@@ -282,7 +351,10 @@ export function createPaymentRouter({
       if (!mayReadPayment(payment, request.auth!.userId, request.auth!.role)) {
         throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
       }
-      response.status(200).json(apiSuccess({ payment: paymentDto(payment), bookingStatus: relatedBooking(payment)?.status ?? null }));
+      response.status(200).json(apiSuccess({
+        payment: paymentDto(payment), bookingStatus: relatedBooking(payment)?.status ?? null,
+        tournamentStatus: relatedTournament(payment)?.status ?? null,
+      }));
     } catch (error) { next(error); }
   });
 
@@ -425,6 +497,30 @@ export function createPaymentRouter({
     } catch (error) { next(error); }
   });
 
+  router.get('/tournaments/:tournamentId/payment-instructions', authenticate, playerOnly, async (request, response, next) => {
+    try {
+      const tournamentId = routeId(request, 'tournamentId');
+      const participant = await prisma.tournamentParticipant.findUnique({
+        where: { tournamentId_userId: { tournamentId, userId: request.auth!.userId } },
+        select: { id: true, tournament: { select: { venue: { select: { vendorProfileId: true } } } } },
+      });
+      if (!participant) throw new HttpError(404, 'TEAM_NOT_FOUND', 'Your tournament team was not found.');
+      const payment = await prisma.payment.findFirst({
+        where: { userId: request.auth!.userId, tournamentParticipantId: participant.id, method: 'BANK_TRANSFER' },
+        select: { id: true },
+      });
+      if (!payment) throw new HttpError(409, 'BANK_TRANSFER_NOT_SELECTED', 'Select bank transfer for this tournament entry first.');
+      const instructions = await prisma.vendorPaymentInstructions.findFirst({
+        where: { vendorProfileId: participant.tournament.venue.vendorProfileId, active: true },
+      });
+      if (!instructions) throw new HttpError(404, 'BANK_INSTRUCTIONS_NOT_CONFIGURED', 'This tournament venue has not configured active bank transfer instructions.');
+      response.status(200).json(apiSuccess({
+        bankName: instructions.bankName, accountTitle: instructions.accountTitle,
+        iban: instructions.iban, accountNumber: instructions.accountNumber, instructions: instructions.instructions,
+      }));
+    } catch (error) { next(error); }
+  });
+
   router.get('/vendors/me/payments/transfers', authenticate, vendorOnly, async (request, response, next) => {
     const parsed = transferListQuerySchema.safeParse(request.query);
     if (!parsed.success) { invalid(response, parsed.error.issues); return; }
@@ -443,6 +539,11 @@ export function createPaymentRouter({
           customerName: relatedBooking(payment)!.customerName,
           startsAt: relatedBooking(payment)!.startsAt.toISOString(),
           endsAt: relatedBooking(payment)!.endsAt.toISOString(),
+        } : null,
+        tournament: relatedTournament(payment) ? {
+          id: relatedTournament(payment)!.id, title: relatedTournament(payment)!.title,
+          venueName: relatedTournament(payment)!.venue.name,
+          startsAt: relatedTournament(payment)!.startsAt.toISOString(),
         } : null,
       })), { page, limit, total }));
     } catch (error) { next(error); }
@@ -464,6 +565,11 @@ export function createPaymentRouter({
           customerName: relatedBooking(payment)!.customerName,
           startsAt: relatedBooking(payment)!.startsAt.toISOString(),
           endsAt: relatedBooking(payment)!.endsAt.toISOString(),
+        } : null,
+        tournament: relatedTournament(payment) ? {
+          id: relatedTournament(payment)!.id, title: relatedTournament(payment)!.title,
+          venueName: relatedTournament(payment)!.venue.name,
+          startsAt: relatedTournament(payment)!.startsAt.toISOString(),
         } : null,
       })), { page, limit, total }));
     } catch (error) { next(error); }
@@ -550,13 +656,7 @@ export function createPaymentRouter({
       if (!['AWAITING_TRANSFER', 'REJECTED'].includes(payment.status)) {
         throw new HttpError(409, 'RECEIPT_UPLOAD_NOT_ALLOWED', 'A receipt cannot be uploaded in the current payment state.');
       }
-      const booking = relatedBooking(payment);
-      if (!booking || !['PENDING_PAYMENT', 'CONFIRMED'].includes(booking.status)) {
-        throw new HttpError(409, 'BOOKING_NOT_PAYABLE', 'The booking is no longer accepting transfer receipts.');
-      }
-      if (booking.status === 'PENDING_PAYMENT' && booking.holdExpiresAt && booking.holdExpiresAt <= new Date()) {
-        throw new HttpError(409, 'BOOKING_HOLD_EXPIRED', 'The booking hold has expired.');
-      }
+      if (!paymentTargetIsOpen(payment)) throw new HttpError(409, 'PAYMENT_TARGET_CLOSED', 'This booking or tournament is no longer accepting transfer receipts.');
       const extension = validateReceiptFile(parsed.data);
       const upload = await storage.createSignedUpload({
         payerUserId: request.auth!.userId, paymentId: payment.id,
@@ -607,11 +707,8 @@ export function createPaymentRouter({
         if (payment.receipts.length >= MAX_RECEIPT_ATTEMPTS) {
           throw new HttpError(409, 'RECEIPT_ATTEMPT_LIMIT', 'The maximum number of transfer receipt submissions has been reached.');
         }
+        if (!paymentTargetIsOpen(payment, now)) throw new HttpError(409, 'PAYMENT_TARGET_CLOSED', 'This booking or tournament is no longer accepting transfer receipts.');
         const booking = relatedBooking(payment);
-        if (!booking || !['PENDING_PAYMENT', 'CONFIRMED'].includes(booking.status)
-          || (booking.status === 'PENDING_PAYMENT' && booking.holdExpiresAt && booking.holdExpiresAt <= now)) {
-          throw new HttpError(409, 'BOOKING_HOLD_EXPIRED', 'The booking is no longer held for this transfer.');
-        }
         const previousStatus = payment.status;
         const receipt = await tx.paymentReceipt.create({ data: {
           paymentId, storagePath: parsed.data.storagePath, fileName: parsed.data.fileName.replace(/[\\/]/g, '_'),
@@ -622,7 +719,7 @@ export function createPaymentRouter({
           paymentId, actorUserId: request.auth!.userId, previousStatus, newStatus: 'PROOF_SUBMITTED',
           amountPaisa: payment.amountPaisa, reason: 'BANK_TRANSFER_RECEIPT_SUBMITTED',
         } });
-        if (booking.status === 'PENDING_PAYMENT') {
+        if (booking?.status === 'PENDING_PAYMENT') {
           await tx.booking.update({ where: { id: booking.id }, data: { holdExpiresAt: new Date(now.getTime() + RECEIPT_REVIEW_HOLD_MS), paymentStatus: 'PENDING' } });
         }
         const fresh = await tx.payment.findUnique({ where: { id: paymentId }, include: paymentDetailsInclude });

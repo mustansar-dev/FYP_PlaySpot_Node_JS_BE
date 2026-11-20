@@ -35,6 +35,22 @@ function setup() {
     },
     sport: { findFirst: vi.fn(async () => ({ id: sportId })) },
     court: { findFirst: vi.fn(async () => null) },
+    courtBlock: { findFirst: vi.fn(async () => null) },
+    booking: {
+      findFirst: vi.fn(async () => null),
+      findUnique: vi.fn(),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: '99999999-9999-4999-8999-999999999999',
+        participants: [{ id: 'participant-id', contribution: { id: 'contribution-id' } }],
+        data,
+      })),
+      update: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })),
+    },
+    bookingParticipant: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+    paymentContribution: { update: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
+    payment: { create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'payment-id', ...data })), findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 1 })) },
+    paymentStatusAudit: { create: vi.fn(async () => ({})), createMany: vi.fn(async () => ({ count: 1 })) },
+    gameRoomShare: { findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
     conversation: {
       findFirst: vi.fn(async () => null),
       create: vi.fn(async () => conversation),
@@ -44,6 +60,7 @@ function setup() {
         lastGameRoomCreateData = data;
         return {
           id: conversationId, title: 'Badminton tonight', locationLabel: 'PlaySpot Arena',
+          bookingId: data.bookingId,
           startsAt: new Date(Date.now() + 3_600_000), endsAt: new Date(Date.now() + 7_200_000),
           timeZone: 'Asia/Karachi', visibility: 'PUBLIC', capacity: 4, totalCostPaisa: 0,
           perPlayerSharePaisa: 0, paymentMode: 'PAY_AT_VENUE', status: 'OPEN', createdAt: new Date(),
@@ -96,5 +113,33 @@ describe('community venue conversations', () => {
       conversation: { create: { members: { create: Array<{ userId: string }> } } };
     };
     expect(createData.conversation.create.members.create).toEqual([{ userId: playerId }, { userId: vendorId }]);
+  });
+
+  it('reserves the selected court and creates balanced due-at-venue shares for a room', async () => {
+    const { app, token, prisma, getLastGameRoomCreateData } = setup();
+    vi.mocked(prisma.court.findFirst).mockResolvedValueOnce({
+      id: '66666666-6666-4666-8666-666666666666', venueId, sportId, hourlyPricePaisa: 40_001,
+      slotDurationMinutes: 60, openingTime: '09:00', closingTime: '17:00', availableDays: ['Sat'],
+      venue: { id: venueId, timeZone: 'Asia/Karachi' },
+    } as never);
+    const startsAt = '2026-11-21T06:00:00.000Z';
+    const endsAt = '2026-11-21T07:00:00.000Z';
+    const response = await request(app).post('/api/v1/game-rooms').set('Authorization', `Bearer ${token}`).send({
+      sportId, venueId, courtId: '66666666-6666-4666-8666-666666666666', title: 'Badminton tonight',
+      locationLabel: 'PlaySpot Arena', startsAt, endsAt, capacity: 4, visibility: 'PRIVATE', paymentMode: 'PAY_AT_VENUE',
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.room.bookingId).toBe('99999999-9999-4999-8999-999999999999');
+    const bookingCreate = vi.mocked(prisma.booking.create).mock.calls[0]?.[0] as { data: Record<string, unknown> };
+    expect(bookingCreate.data).toMatchObject({ source: 'APP', status: 'CONFIRMED', paymentMode: 'PAY_AT_VENUE', paymentStatus: 'DUE_AT_VENUE', totalPaisa: 40_001 });
+    const roomCreate = getLastGameRoomCreateData() as { data?: unknown; bookingId?: string; shares: { create: Array<{ amountPaisa: number; seatIndex: number; status: string }> } };
+    expect(roomCreate.bookingId).toBe('99999999-9999-4999-8999-999999999999');
+    const roomWrite = (vi.mocked(prisma.gameRoom.create).mock.calls[0]?.[0] as { data: { shares: { create: Array<{ amountPaisa: number; seatIndex: number; status: string }> } } }).data;
+    expect(roomWrite.shares.create.map(share => share.amountPaisa)).toEqual([10_001, 10_000, 10_000, 10_000]);
+    expect(roomWrite.shares.create[0]).toMatchObject({ seatIndex: 0, status: 'DUE_AT_VENUE' });
+    expect(vi.mocked(prisma.payment.create)).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      method: 'PAY_AT_VENUE', status: 'DUE_AT_VENUE', amountPaisa: 10_001, contributionId: 'contribution-id',
+    }) }));
   });
 });

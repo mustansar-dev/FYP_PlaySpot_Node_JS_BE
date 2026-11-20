@@ -1,7 +1,7 @@
 import { Router, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { rateLimit } from 'express-rate-limit';
-import type { PrismaClient, UserRole } from '../../generated/prisma/client.js';
+import type { Prisma, PrismaClient, UserRole } from '../../generated/prisma/client.js';
 import { apiError, apiSuccess } from '../../common/apiResponse.js';
 import { HttpError } from '../../common/httpError.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
@@ -36,6 +36,27 @@ export function createAuthRouter({ prisma, accessSecret, refreshSecret }: AuthRo
     return { accessToken: createAccessToken(userId, role, accessSecret), refreshToken: rawRefresh, tokenType: 'Bearer' };
   }
 
+  async function resolvePreferredSports(tx: Prisma.TransactionClient, values: string[]) {
+    if (!values.length) return [];
+    const normalized = [...new Set(values.map(value => value.trim().toLowerCase()))];
+    const found = await tx.sport.findMany({
+      where: { isActive: true, OR: normalized.flatMap(value => [
+        { code: value }, { name: { equals: value, mode: 'insensitive' as const } },
+      ]) },
+      select: { id: true },
+    });
+    if (!found.length) {
+      const hasCatalog = await tx.sport.findFirst({ where: { isActive: true }, select: { id: true } });
+      if (!hasCatalog) {
+        throw new HttpError(503, 'SPORT_CATALOG_NOT_SEEDED', 'Sports are not initialized in this database. Run `npm run setup` in the backend project, then retry registration.');
+      }
+    }
+    if (found.length !== normalized.length) {
+      throw new HttpError(400, 'INVALID_SPORT', 'One or more selected sports are not in the active sports catalog.');
+    }
+    return found;
+  }
+
   router.post('/auth/register/player', authLimiter, async (request, response, next) => {
     const parsed = playerRegistrationSchema.safeParse(request.body);
     if (!parsed.success) { invalid(response, parsed.error.issues); return; }
@@ -43,13 +64,7 @@ export function createAuthRouter({ prisma, accessSecret, refreshSecret }: AuthRo
       const input = parsed.data;
       const passwordHash = await bcrypt.hash(input.password, 12);
       const user = await prisma.$transaction(async tx => {
-        const sportRecords = input.preferredSports.length
-          ? await tx.sport.findMany({ where: { isActive: true, OR: input.preferredSports.flatMap(value => [
-            { code: value.toLowerCase() }, { name: { equals: value, mode: 'insensitive' as const } },
-          ]) }, select: { id: true } }) : [];
-        if (sportRecords.length !== new Set(input.preferredSports.map(value => value.toLowerCase())).size) {
-          throw new HttpError(400, 'INVALID_SPORT', 'One or more preferred sports are not supported.');
-        }
+        const sportRecords = await resolvePreferredSports(tx, input.preferredSports);
         return tx.user.create({ data: {
           role: 'PLAYER', name: input.name, email: input.email, phone: input.phone || null, passwordHash,
           preferredSports: { create: sportRecords.map(sport => ({ sportId: sport.id })) },
@@ -159,12 +174,7 @@ export function createAuthRouter({ prisma, accessSecret, refreshSecret }: AuthRo
       const { preferredSports } = parsed.data;
       const user = await prisma.$transaction(async tx => {
         if (preferredSports) {
-          const found = await tx.sport.findMany({ where: { isActive: true, OR: preferredSports.flatMap(value => [
-            { code: value.toLowerCase() }, { name: { equals: value, mode: 'insensitive' as const } },
-          ]) }, select: { id: true } });
-          if (found.length !== new Set(preferredSports.map(value => value.toLowerCase())).size) {
-            throw new HttpError(400, 'INVALID_SPORT', 'One or more preferred sports are not supported.');
-          }
+          const found = await resolvePreferredSports(tx, preferredSports);
           await tx.userSport.deleteMany({ where: { userId: request.auth!.userId } });
           if (found.length) await tx.userSport.createMany({ data: found.map(sport => ({ userId: request.auth!.userId, sportId: sport.id })) });
         }

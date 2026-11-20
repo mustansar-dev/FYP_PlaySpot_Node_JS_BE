@@ -1,23 +1,15 @@
 import 'dotenv/config';
 import { loadConfig } from '../src/config/env.js';
 import { disconnectPrismaClient, getPrismaClient } from '../src/database/prisma.js';
+import { AMENITIES_CATALOG, SPORTS_CATALOG } from '../src/config/referenceData.js';
 
 const config = loadConfig();
-const prisma = getPrismaClient(config.DATABASE_URL);
-
-const sports = [
-  { code: 'futsal', name: 'Futsal' },
-  { code: 'football', name: 'Football' },
-  { code: 'cricket', name: 'Cricket' },
-  { code: 'padel', name: 'Padel' },
-  { code: 'badminton', name: 'Badminton' },
-  { code: 'basketball', name: 'Basketball' },
-];
-
-const amenities = ['Changing rooms', 'Washrooms', 'Floodlights', 'Seating', 'Cafe', 'Showers'];
+// Reference catalog writes use the DDL-capable migration role. API traffic must
+// continue to use the restricted DATABASE_URL runtime role.
+const prisma = getPrismaClient(config.MIGRATOR_DATABASE_URL ?? config.DATABASE_URL);
 
 async function main(): Promise<void> {
-  for (const sport of sports) {
+  for (const sport of SPORTS_CATALOG) {
     await prisma.sport.upsert({
       where: { code: sport.code },
       update: { name: sport.name, isActive: true },
@@ -25,11 +17,11 @@ async function main(): Promise<void> {
     });
   }
 
-  for (const name of amenities) {
+  for (const name of AMENITIES_CATALOG) {
     await prisma.amenity.upsert({ where: { name }, update: { isActive: true }, create: { name } });
   }
 
-  console.info(`Seeded ${sports.length} sports and ${amenities.length} amenities.`);
+  console.info(`Seeded ${SPORTS_CATALOG.length} sports and ${AMENITIES_CATALOG.length} amenities.`);
 }
 
 main()

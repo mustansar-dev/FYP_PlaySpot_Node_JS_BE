@@ -8,7 +8,7 @@ PlaySpot PK is a React Native sports venue booking and matchmaking app. This bac
 - Frontend checkout inspected for this foundation: `/home/ibrahim/rn_lab_workspace/FYP_PlaySpot_React_Native_FE`. This path is machine-specific; use the repository URL on another computer.
 - Team: Ibrahim Sattar (BSSE23004), Mustansar (BSSE23027), Hasham (BSSE23053).
 - Backend runtime: Node.js 22 with npm. This machine has Node `v22.17.0` and npm `10.9.2`; Prisma 7.10.1 supports Node 22.12+.
-- Current integration checkouts: backend `frontend-integration`, frontend `backend-integration`. The current branches and working-tree state were preserved; no branch switch, reset, rebase or push was performed.
+- Current integration checkouts: backend `frontend-integration`, frontend `backend-integration`. Existing local changes were reviewed and preserved; no branch switch, reset, rebase or push was performed.
 - The updated backend week plan and prompt pack were read for this release pass; their contents are not duplicated here.
 - Exactly one README is maintained in this repository: this root file. Setup, contract, schema, decisions and limitations stay here.
 
@@ -19,7 +19,9 @@ PlaySpot PK is a React Native sports venue booking and matchmaking app. This bac
 3. Venue APIs provide vendor-owned venue/court/equipment/media operations, public discovery/detail/reviews and parameterized PostGIS nearby search.
 4. Booking APIs provide availability, server-priced reservations, walk-ins on the shared court calendar, history, cancellation and payment contributions. Payment routes provide safeguarded Safepay Sandbox or a development-only simulation, pay-at-venue, bank-transfer instructions/receipt review and vendor collection controls.
 5. Community APIs provide public/private rooms, persisted member-checked chat, tournaments, leaderboards and vendor analytics. Socket.IO authenticates with the same JWT and REST remains the history/send fallback.
-6. Prompt 6 connects high-priority React Native account, discovery, booking, community and analytics flows to these APIs. Exact limitations are listed below. No local database migration or seed was applied in this QA pass because this checkout has no backend `.env`, this PostgreSQL role cannot create a separate database, and PostGIS is unavailable on the installed server.
+6. Prompt 6 connects high-priority React Native account, discovery, booking, community and analytics flows to these APIs. The current local development database is `playspot_db`, with restricted runtime role `playspot_user` and DDL role `playspot_migrator`.
+7. The local `playspot_db` had an empty active sports catalog, which caused player registration to reject the frontend's selected interests. The reference seed is now part of the one-command setup and registration returns an actionable `SPORT_CATALOG_NOT_SEEDED` error if setup was skipped.
+8. The database had an applied generated migration that dropped the custom PostGIS and payment indexes. A follow-up migration restores those indexes, and the Prisma schema now declares all three so future schema diffs preserve them.
 
 ## Frontend audit
 
@@ -183,31 +185,44 @@ The integration adds the read-only `/sports` reference route, persisted chat not
 
 ## Environment and commands
 
-Node.js 22 and npm are used to match the installed environment. Copy the environment template before install because Prisma's config reads `DATABASE_URL` during generation:
+Requirements: Node.js 22.12 or newer, npm, and PostgreSQL with PostGIS plus `btree_gist`. Keep the app and migration roles separate:
+
+- `DATABASE_URL` connects as `playspot_user` and is used by the running API.
+- `MIGRATOR_DATABASE_URL` connects as `playspot_migrator` to the same database and is used for migrations and reference-data seeding.
+- `SHADOW_DATABASE_URL` is an optional, separate database used only by `prisma migrate dev`. It is not needed by the first-time `setup` script, which uses the checked-in migrations with `migrate deploy`.
+
+From a clean checkout:
 
 ```bash
-cp .env.example .env
-# Edit DATABASE_URL to point to your own local database or the team-approved Supabase dev project.
-# Set JWT_ACCESS_SECRET and JWT_REFRESH_SECRET to different random values of at least 32 characters.
-npm ci
-npm run prisma:validate
-npm run prisma:generate
-npm run prisma:migrate:deploy
-npm run prisma:seed
+npm run setup
 npm run dev
 ```
 
-The API listens on `PORT` (default 4000). `GET /health` is liveness and does not require the database; `GET /api/v1/health` verifies DB connectivity and returns 503 when unavailable. The server requires a PostgreSQL `DATABASE_URL`; `.env.example` contains only a placeholder. Never commit `.env` or copy Supabase credentials into the mobile app.
+`npm run setup` installs the lockfile dependencies, creates an ignored `.env` from `.env.example` if needed, generates local JWT secrets, validates/generates Prisma Client, applies pending checked-in migrations using the migrator role, seeds sports and amenities, and verifies database access. If `MIGRATOR_DATABASE_URL` is missing but a same-server `SHADOW_DATABASE_URL` is configured with a different role, the script derives the migration-role URL for the runtime database without printing it. Otherwise, set both database URLs in `.env` and rerun setup. `npm run db:setup` repeats the database steps without reinstalling dependencies. Neither command resets or truncates data.
 
-For Android Emulator access to a development host, Android's standard emulator host alias is `10.0.2.2`; physical devices require a reachable LAN/tunnel address. Do not commit a developer-specific IP. The frontend config in `src/config/backendApi.js` uses `http://10.0.2.2:4000/api/v1` on Android and `http://localhost:4000/api/v1` elsewhere. Override with `globalThis.__PLAYSPOT_API_BASE_URL__` for a physical device's LAN host. Configure the Express `CORS_ORIGINS` if using a web client; native requests commonly have no `Origin` header. Keep the API on a reachable local network and never embed backend secrets in the app.
+The sports catalog seed is idempotent. It creates Futsal, Football, Cricket, Padel, Badminton and Basketball. Player registration/profile edits and tournament/room forms use these active rows; an empty catalog now returns `SPORT_CATALOG_NOT_SEEDED` with the setup command.
+
+Useful commands:
+
+```bash
+npm run db:check
+npm run prisma:migrate:status
+npm run prisma:migrate:dev       # isolated development DB only; needs SHADOW_DATABASE_URL or CREATEDB
+npm run prisma:migrate:deploy    # apply reviewed migrations with MIGRATOR_DATABASE_URL
+npm run prisma:seed              # idempotent reference data seed, using the migrator role
+npm run dev
+```
+
+The API listens on `PORT` (default `4000`). `GET /health` is liveness; `GET /api/v1/health` checks database readiness. `npm run db:check` confirms the two roles target the same database, runtime read/account-write privileges, migrator schema-create privilege, PostGIS extensions and seeded sports without printing connection strings.
+
+For the React Native app, `npm run setup` in the frontend creates its local `.env` and installs dependencies. Android Emulator uses `http://10.0.2.2:4000/api/v1`; a physical phone must use the development computer's reachable LAN/tunnel address. The API URL is public configuration and belongs only in the frontend `.env`. Never copy `DATABASE_URL`, `MIGRATOR_DATABASE_URL`, Supabase service-role keys or payment secrets into the app.
 
 ### Database setup / migration status
 
-1. Use the agreed Supabase project or an isolated local PostgreSQL database. Never use `prisma migrate reset`, truncate or destructive push commands on the shared instance.
-2. On Supabase, enable PostGIS in the `extensions` schema. The migration also enables `btree_gist` there. On local PostgreSQL, PostGIS must be installed by the administrator first; `btree_gist` availability was confirmed locally.
-3. The checked-in migration is the canonical initial schema. Run `npm run prisma:migrate:deploy` only after checking that `DATABASE_URL` targets the approved empty development database.
-4. This foundation did **not** apply migrations: no shared URL/credentials were configured, local PostgreSQL does not list PostGIS as an available extension, and Docker is not installed. The API schema/client and migration can be validated offline; live DB health/migration must be completed after a team-approved database is available.
-5. The migration adds PostGIS, a geography GiST index, booking exclusion and domain check constraints as hand-reviewed SQL because Prisma's typed schema cannot express all of them. Preserve these statements in later migrations and review schema drift; do not replace them with `db push` or a migration reset.
+1. Use the approved development database or an isolated local PostgreSQL/PostGIS database. Never use `prisma migrate reset`, truncate, or destructive push commands on shared data.
+2. Migrations run as `playspot_migrator`; API requests run as `playspot_user`. Both connection URLs must point to the same database. For local migration authoring with `migrate dev`, provision a separate shadow database and set `SHADOW_DATABASE_URL`.
+3. The checked-in migrations install PostGIS and `btree_gist`, create the venue geography GiST index, and enforce court overlap/domain constraints. The three custom indexes are now declared in `schema.prisma`; migration `20261120150000_restore_preserved_indexes` restores them after the generated `20261120141941_1st` migration dropped them.
+4. In this workspace, `npm run db:setup` applied the pending index-restoration migration and seeded six sports plus six amenities into the local `playspot_db`. `npm run db:check` then verified PostGIS, `btree_gist`, runtime role access and migrator DDL access. Do not run this against a production database.
 
 ## Environment variables
 
@@ -217,8 +232,10 @@ For Android Emulator access to a development host, Android's standard emulator h
 | `PORT` | No | HTTP port; default `4000`. |
 | `API_PREFIX` | No | Versioned route prefix; default `/api/v1`. |
 | `APP_ORIGINS` | No | Comma-separated browser origins; default local Metro web origin. Native requests without an Origin header are accepted. |
-| `DATABASE_URL` | Yes | PostgreSQL connection for Prisma. |
-| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Yes outside tests | Independent random secrets, at least 32 characters each. Server startup fails when either is missing or short. Refresh token digests use the refresh secret; JWT access tokens use the access secret. |
+| `DATABASE_URL` | Yes | Restricted PostgreSQL runtime connection (`playspot_user`). |
+| `MIGRATOR_DATABASE_URL` | Yes for `npm run setup` | DDL-capable PostgreSQL connection (`playspot_migrator`) to the same database. Prisma migrations and reference seeding use this role. |
+| `SHADOW_DATABASE_URL` | Only for `prisma migrate dev` | Separate shadow database; never point it at the actual development database. |
+| `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | Yes outside tests | Independent secrets, at least 32 characters. `npm run setup` generates local values if blank; the API never prints them. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` | Optional for API startup; required for venue media | Server-side signed upload, object verification and deletion. Keep the service role key on the backend. Configure the bucket for public reads because venue DTOs return public media URLs. |
 | `GEOAPIFY_API_KEY` | Optional/not used by current routes | No geocoding endpoint is exposed; vendors can submit manually selected coordinates. |
 | `PAYMENT_PROVIDER` | No | `.env.example` selects `development_mock` for a local-only, clearly labelled payment simulation. Production startup rejects this adapter. |
