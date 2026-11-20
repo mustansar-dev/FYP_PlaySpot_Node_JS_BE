@@ -85,7 +85,7 @@ export function bookingDto(booking: BookingDetails) {
       } : null,
     })),
     payments: [
-      ...booking.payments,
+      ...(booking.payments ?? []),
       ...booking.participants.flatMap(participant => participant.contribution?.payments ?? []),
     ].map(payment => ({
       id: payment.id, userId: payment.userId, method: payment.method, status: payment.status,

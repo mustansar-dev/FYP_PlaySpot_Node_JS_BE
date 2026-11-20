@@ -14,10 +14,11 @@ const venueId = '33333333-3333-4333-8333-333333333333';
 const sportId = '44444444-4444-4444-8444-444444444444';
 const conversationId = '55555555-5555-4555-8555-555555555555';
 
-function setup() {
+function setup(options: { role?: 'PLAYER' | 'VENDOR' } = {}) {
+  const role = options.role ?? 'PLAYER';
   let lastGameRoomCreateData: Record<string, unknown> | null = null;
   const venue = {
-    id: venueId, name: 'PlaySpot Arena', city: 'Lahore',
+    id: venueId, name: 'PlaySpot Arena', city: 'Lahore', timeZone: 'Asia/Karachi',
     vendorProfile: { ownerUserId: vendorId },
   };
   const conversation = {
@@ -29,12 +30,15 @@ function setup() {
     ], messages: [], gameRoom: null, tournament: null,
   };
   const prisma = {
-    user: { findUnique: vi.fn(async () => ({ id: playerId, role: 'PLAYER', status: 'ACTIVE' })) },
+    user: { findUnique: vi.fn(async () => ({ id: role === 'VENDOR' ? vendorId : playerId, role, status: 'ACTIVE' })) },
     venue: {
       findFirst: vi.fn(async () => ({ id: venueId, name: venue.name, vendorProfile: venue.vendorProfile })),
     },
     sport: { findFirst: vi.fn(async () => ({ id: sportId })) },
-    court: { findFirst: vi.fn(async () => null) },
+    court: {
+      findFirst: vi.fn(async () => null),
+      findMany: vi.fn(async () => []),
+    },
     courtBlock: { findFirst: vi.fn(async () => null) },
     booking: {
       findFirst: vi.fn(async () => null),
@@ -70,6 +74,10 @@ function setup() {
         };
       }),
     },
+    tournament: {
+      create: vi.fn(async () => ({ id: '88888888-8888-4888-8888-888888888888' })),
+      findUniqueOrThrow: vi.fn(async () => ({ id: '88888888-8888-4888-8888-888888888888' })),
+    },
     $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma)),
     $queryRaw: vi.fn(async () => []),
   };
@@ -77,11 +85,43 @@ function setup() {
   app.use(express.json());
   app.use('/api/v1', createCommunityRouter({ prisma: prisma as unknown as PrismaClient, accessSecret, realtime: new RealtimeHub() }));
   app.use(errorHandler);
-  const token = createAccessToken(playerId, 'PLAYER', accessSecret);
+  const token = createAccessToken(role === 'VENDOR' ? vendorId : playerId, role, accessSecret);
   return { app, token, prisma, getLastGameRoomCreateData: () => lastGameRoomCreateData };
 }
 
 describe('community venue conversations', () => {
+  it('locks every selected tournament court and reserves it on the shared booking calendar', async () => {
+    const { app, token, prisma } = setup({ role: 'VENDOR' });
+    const tournamentId = '88888888-8888-4888-8888-888888888888';
+    const courtId = '66666666-6666-4666-8666-666666666666';
+    const eventDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+    while (eventDate.getUTCDay() !== 6) eventDate.setUTCDate(eventDate.getUTCDate() + 1);
+    const dateKey = eventDate.toISOString().slice(0, 10);
+    const startsAt = new Date(`${dateKey}T06:00:00.000Z`);
+    const endsAt = new Date(`${dateKey}T07:00:00.000Z`);
+    vi.mocked(prisma.court.findMany).mockResolvedValueOnce([{
+      id: courtId, name: 'Badminton Court A', venueId, sportId, hourlyPricePaisa: 50_000,
+      slotDurationMinutes: 60, openingTime: '09:00', closingTime: '17:00', availableDays: ['Sat'],
+      venue: { id: venueId, timeZone: 'Asia/Karachi' },
+    }] as never);
+    vi.mocked(prisma.tournament.findUniqueOrThrow).mockResolvedValueOnce({
+      id: tournamentId, startsAt, endsAt,
+    } as never);
+    const response = await request(app).post('/api/v1/tournaments').set('Authorization', `Bearer ${token}`).send({
+      venueId, sportId, courtIds: [courtId], title: 'Saturday Badminton Cup',
+      startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(),
+      maxTeams: 8, teamSize: 2, entryFeePerPlayerPaisa: 5_000, prizePaisa: 20_000,
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.id).toBe(tournamentId);
+    expect(prisma.$queryRaw).toHaveBeenCalled();
+    expect(prisma.booking.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      tournamentId, source: 'TOURNAMENT', status: 'CONFIRMED', paymentStatus: 'PAID', totalPaisa: 0,
+    }) }));
+    expect(prisma.payment.create).not.toHaveBeenCalled();
+  });
+
   it('creates a persisted private venue chat with the authenticated player and the venue owner', async () => {
     const { app, token, prisma } = setup();
     const response = await request(app).post(`/api/v1/venues/${venueId}/conversations`)

@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     venues: {
       prisma,
       accessSecret: config.JWT_ACCESS_SECRET!,
+      allowPendingVendorPublish: config.NODE_ENV === 'development',
       ...(config.SUPABASE_URL && config.SUPABASE_SERVICE_ROLE_KEY ? {
         storage: new SupabaseVenueStorage(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, config.SUPABASE_STORAGE_BUCKET),
       } : {}),

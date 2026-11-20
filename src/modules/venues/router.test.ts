@@ -25,17 +25,20 @@ function venueRecord() {
   };
 }
 
-function setup(options: { role?: 'PLAYER' | 'VENDOR'; owner?: boolean; eligibleBooking?: boolean; storage?: VenueStorage } = {}) {
+function setup(options: {
+  role?: 'PLAYER' | 'VENDOR'; owner?: boolean; eligibleBooking?: boolean; storage?: VenueStorage;
+  verificationStatus?: 'PENDING' | 'APPROVED'; allowPendingVendorPublish?: boolean;
+} = {}) {
   const role = options.role ?? 'VENDOR';
   const userId = role === 'PLAYER' ? playerId : ownerId;
   const rawQueryParameters: unknown[][] = [];
   const prisma = {
     user: { findUnique: vi.fn(async () => ({ id: userId, role, status: 'ACTIVE' })) },
-    vendorProfile: { findUnique: vi.fn(async () => ({ id: profileId, verificationStatus: 'APPROVED' })) },
+    vendorProfile: { findUnique: vi.fn(async () => ({ id: profileId, verificationStatus: options.verificationStatus ?? 'APPROVED' })) },
     venue: {
       findFirst: vi.fn(async () => options.owner === false ? null : { id: venueId, vendorProfileId: profileId, published: true }),
       findMany: vi.fn(async () => []), count: vi.fn(async () => 0),
-      create: vi.fn(), update: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })),
+      create: vi.fn(), update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...venueRecord(), ...data })), updateMany: vi.fn(async () => ({ count: 1 })),
     },
     venueSport: { deleteMany: vi.fn(), createMany: vi.fn() },
     venueAmenity: { deleteMany: vi.fn(), createMany: vi.fn() },
@@ -66,13 +69,36 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR'; owner?: boolean; eligibleB
   };
   const app = express();
   app.use(express.json());
-  app.use('/api/v1', createVenueRouter({ prisma, accessSecret: secret, storage }));
+  app.use('/api/v1', createVenueRouter({
+    prisma, accessSecret: secret, storage,
+    ...(options.allowPendingVendorPublish !== undefined ? { allowPendingVendorPublish: options.allowPendingVendorPublish } : {}),
+  }));
   app.use(errorHandler);
   const token = createAccessToken(userId, role, secret);
   return { app, prisma, storage, token, rawQueryParameters };
 }
 
 describe('venue catalog routes', () => {
+  it('allows a pending vendor to publish their venue only when the development policy enables it', async () => {
+    const { app, token, prisma } = setup({ verificationStatus: 'PENDING', allowPendingVendorPublish: true });
+    const response = await request(app).patch(`/api/v1/venues/${venueId}`).set('Authorization', `Bearer ${token}`).send({ published: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.published).toBe(true);
+    expect(mockMethod(prisma, 'venue', 'update')).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: venueId }, data: expect.objectContaining({ published: true }),
+    }));
+  });
+
+  it('keeps venue publishing approval-gated when development publishing is disabled', async () => {
+    const { app, token, prisma } = setup({ verificationStatus: 'PENDING', allowPendingVendorPublish: false });
+    const response = await request(app).patch(`/api/v1/venues/${venueId}`).set('Authorization', `Bearer ${token}`).send({ published: true });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('VENDOR_NOT_APPROVED');
+    expect(mockMethod(prisma, 'venue', 'update')).not.toHaveBeenCalled();
+  });
+
   it('returns active sports with stable IDs for mobile room and tournament forms', async () => {
     const { app, prisma } = setup();
     mockMethod(prisma, 'sport', 'findMany').mockResolvedValueOnce([{ id: venueId, name: 'Futsal', code: 'futsal' }] as never);

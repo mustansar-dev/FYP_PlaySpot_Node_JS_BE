@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
+import { URL } from 'node:url';
 
 const adminUrl = process.env.PLAYSPOT_POSTGRES_ADMIN_URL;
 const runtimePassword = process.env.PLAYSPOT_USER_PASSWORD;
@@ -62,8 +63,6 @@ try {
   const migratorRole = 'playspot_migrator';
   const appPassword = requiredPassword(runtimePassword, 'PLAYSPOT_USER_PASSWORD');
   const ddlPassword = requiredPassword(migratorPassword, 'PLAYSPOT_MIGRATOR_PASSWORD');
-  const mainDb = quoteIdentifier(databaseName, 'PLAYSPOT_DB_NAME');
-  const shadowDb = quoteIdentifier(shadowDatabaseName, 'PLAYSPOT_SHADOW_DB_NAME');
   if (databaseName === shadowDatabaseName) throw new Error('PLAYSPOT_DB_NAME and PLAYSPOT_SHADOW_DB_NAME must differ.');
 
   const maintenanceUrl = new URL(admin.toString());

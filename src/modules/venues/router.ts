@@ -15,6 +15,7 @@ export interface VenueRouterOptions {
   prisma: PrismaClient;
   accessSecret: string;
   storage?: VenueStorage;
+  allowPendingVendorPublish?: boolean;
 }
 
 const venueInclude = {
@@ -113,7 +114,9 @@ function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002';
 }
 
-export function createVenueRouter({ prisma, accessSecret, storage = new UnconfiguredVenueStorage() }: VenueRouterOptions): Router {
+export function createVenueRouter({
+  prisma, accessSecret, storage = new UnconfiguredVenueStorage(), allowPendingVendorPublish = false,
+}: VenueRouterOptions): Router {
   const router = Router();
   const authenticate = requireAuth(prisma, accessSecret);
   const vendorOnly = requireRole('VENDOR');
@@ -325,8 +328,8 @@ export function createVenueRouter({ prisma, accessSecret, storage = new Unconfig
     try {
       const input = parsed.data;
       const profile = await vendorProfile(request.auth!.userId);
-      if (input.published && profile.verificationStatus !== 'APPROVED') {
-        throw new HttpError(403, 'VENDOR_NOT_APPROVED', 'The vendor profile must be approved before publishing a venue.');
+      if (input.published && profile.verificationStatus !== 'APPROVED' && !allowPendingVendorPublish) {
+        throw new HttpError(403, 'VENDOR_NOT_APPROVED', 'The vendor profile must be approved before publishing this venue.');
       }
       const venue = await prisma.$transaction(async tx => {
         const sports = await resolveSports(tx, input.sports);
@@ -353,8 +356,8 @@ export function createVenueRouter({ prisma, accessSecret, storage = new Unconfig
       const id = routeId(request, 'venueId');
       await ownedVenue(id, request.auth!.userId);
       const profile = await vendorProfile(request.auth!.userId);
-      if (parsed.data.published === true && profile.verificationStatus !== 'APPROVED') {
-        throw new HttpError(403, 'VENDOR_NOT_APPROVED', 'The vendor profile must be approved before publishing a venue.');
+      if (parsed.data.published === true && profile.verificationStatus !== 'APPROVED' && !allowPendingVendorPublish) {
+        throw new HttpError(403, 'VENDOR_NOT_APPROVED', 'The vendor profile must be approved before publishing this venue.');
       }
       const input = parsed.data;
       const updated = await prisma.$transaction(async tx => {

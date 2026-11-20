@@ -30,7 +30,7 @@ type FakeBookingData = Record<string, unknown> & {
   participants?: { create?: FakeParticipantData[] };
 };
 
-function setup(options: { role?: 'PLAYER' | 'VENDOR'; ownsCourt?: boolean; conflict?: boolean } = {}) {
+function setup(options: { role?: 'PLAYER' | 'VENDOR'; ownsCourt?: boolean; conflict?: boolean; published?: boolean } = {}) {
   const role = options.role ?? 'PLAYER';
   const userId = role === 'PLAYER' ? playerId : vendorId;
   const users = [
@@ -41,7 +41,10 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR'; ownsCourt?: boolean; confl
     id: courtId, venueId, name: 'Court A', openingTime: '09:00', closingTime: '17:00',
     availableDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
     slotDurationMinutes: 60, hourlyPricePaisa: 40_000,
-    venue: { timeZone: 'Asia/Karachi' },
+    venue: {
+      timeZone: 'Asia/Karachi', deletedAt: null, published: options.published ?? true,
+      vendorProfile: { ownerUserId: vendorId },
+    },
   };
   const prisma: Record<string, unknown> = {};
   const createdBooking = vi.fn(async ({ data }: { data: FakeBookingData }) => {
@@ -75,7 +78,7 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR'; ownsCourt?: boolean; confl
       findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) => users.filter(user => where.id.in.includes(user.id)).map(user => ({ ...user, role: 'PLAYER', status: 'ACTIVE' }))),
     },
     vendorProfile: { findUnique: vi.fn(async () => ({ id: '88888888-8888-4888-8888-888888888888' })) },
-    court: { findFirst: vi.fn(async () => options.ownsCourt === false ? null : court) },
+    court: { findFirst: vi.fn(async () => options.ownsCourt === false || (options.published === false && role !== 'VENDOR') ? null : court) },
     courtBlock: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
     booking: {
       findMany: vi.fn(async () => []), findUnique: vi.fn(), count: vi.fn(async () => 0),
@@ -114,6 +117,39 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR'; ownsCourt?: boolean; confl
 }
 
 describe('booking and walk-in routes', () => {
+  it('lets a vendor read the availability of their own unpublished draft court', async () => {
+    const { app, token, prisma } = setup({ role: 'VENDOR', published: false });
+    const response = await request(app).get(`/api/v1/courts/${courtId}/availability?date=${futureDateKey()}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.slots.length).toBeGreaterThan(0);
+    expect(vi.mocked((prisma.court as { findFirst: ReturnType<typeof vi.fn> }).findFirst)).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ venue: expect.objectContaining({
+        OR: expect.arrayContaining([{ vendorProfile: { ownerUserId: vendorId } }]),
+      }) }),
+    }));
+  });
+
+  it('keeps another vendor draft court private from players', async () => {
+    const { app, token } = setup({ role: 'PLAYER', published: false });
+    const response = await request(app).get(`/api/v1/courts/${courtId}/availability?date=${futureDateKey()}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe('COURT_NOT_FOUND');
+  });
+
+  it('rejects a non-UUID court identifier before querying the court table', async () => {
+    const { app, token, prisma } = setup({ role: 'VENDOR', published: false });
+    const response = await request(app).get('/api/v1/courts/ground-local-123/availability')
+      .query({ date: futureDateKey() }).set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toContain('courtId must be a valid UUID');
+    expect((prisma.court as { findFirst: ReturnType<typeof vi.fn> }).findFirst).not.toHaveBeenCalled();
+  });
+
   it('calculates booking price from current court and add-on prices, ignoring client totals and payment status', async () => {
     const { app, token, createdBooking, prisma } = setup();
     const response = await request(app).post('/api/v1/bookings')

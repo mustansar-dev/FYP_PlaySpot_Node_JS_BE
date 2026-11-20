@@ -24,7 +24,7 @@ export interface AppOptions {
   allowedOrigins: string[];
   checkDatabase: DatabaseHealthCheck;
   auth?: { prisma: PrismaClient; accessSecret: string; refreshSecret: string };
-  venues?: { prisma: PrismaClient; accessSecret: string; storage?: VenueStorage };
+  venues?: { prisma: PrismaClient; accessSecret: string; storage?: VenueStorage; allowPendingVendorPublish?: boolean };
   bookings?: {
     prisma: PrismaClient; accessSecret: string;
     onlineProvider: { provider: 'SAFEPAY' | 'DEVELOPMENT_MOCK'; environment: 'SANDBOX' | 'DEVELOPMENT' };

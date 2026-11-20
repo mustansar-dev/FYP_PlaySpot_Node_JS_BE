@@ -151,14 +151,20 @@ export function createBookingRouter({ prisma, accessSecret, onlineProvider }: Bo
   const playerOnly = requireRole('PLAYER');
   const vendorOnly = requireRole('VENDOR');
 
-  router.get('/courts/:courtId/availability', async (request, response, next) => {
+  router.get('/courts/:courtId/availability', authenticate, async (request, response, next) => {
     const parsed = availabilityQuerySchema.safeParse(request.query);
     if (!parsed.success) { invalid(response, parsed.error.issues); return; }
     try {
       await expirePendingHolds(prisma);
       const courtId = routeId(request, 'courtId');
       const court = await prisma.court.findFirst({
-        where: { id: courtId, isActive: true, venue: { deletedAt: null, published: true } },
+        where: { id: courtId, isActive: true, venue: {
+          deletedAt: null,
+          OR: [
+            { published: true },
+            { vendorProfile: { ownerUserId: request.auth!.userId } },
+          ],
+        } },
         select: {
           id: true, name: true, slotDurationMinutes: true, openingTime: true, closingTime: true,
           availableDays: true, venue: { select: { id: true, name: true, timeZone: true } },

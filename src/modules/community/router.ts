@@ -684,7 +684,6 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
         });
         if (courts.length !== orderedCourtIds.length) throw new HttpError(400, 'INVALID_TOURNAMENT_COURT', 'Choose active courts for this sport at the selected venue.');
 
-        const reservationCosts = new Map<string, number>();
         for (const court of courts) {
           const amountPaisa = assertTournamentCourtSchedule(court, input.startsAt, input.endsAt);
           if (!Number.isSafeInteger(amountPaisa) || amountPaisa > 2_000_000_000) {
@@ -704,7 +703,6 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
           ]);
           if (block) throw new HttpError(409, 'TOURNAMENT_COURT_BLOCKED', 'A selected court is blocked during the tournament time.');
           if (overlap) throw new HttpError(409, 'TOURNAMENT_COURT_UNAVAILABLE', 'A selected court already has a booking during the tournament time.');
-          reservationCosts.set(court.id, amountPaisa);
         }
 
         const created = await tx.tournament.create({ data: {
@@ -717,26 +715,14 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
         } });
 
         for (const court of courts) {
-          const totalPaisa = reservationCosts.get(court.id)!;
-          const booking = await tx.booking.create({ data: {
+          await tx.booking.create({ data: {
             venueId: court.venueId, courtId: court.id, customerUserId: request.auth!.userId,
             createdByUserId: request.auth!.userId, tournamentId: created.id,
             source: 'TOURNAMENT', status: 'CONFIRMED', paymentMode: 'PAY_AT_VENUE',
-            paymentStatus: totalPaisa > 0 ? 'DUE_AT_VENUE' : 'PAID',
+            paymentStatus: 'PAID',
             startsAt: input.startsAt, endsAt: input.endsAt, timeZone: court.venue.timeZone,
-            groundFeePaisa: totalPaisa, addOnsTotalPaisa: 0, totalPaisa, currency: 'PKR', holdExpiresAt: null,
-          }, select: { id: true } });
-          if (totalPaisa > 0) {
-            const payment = await tx.payment.create({ data: {
-              userId: request.auth!.userId, provider: 'MANUAL', method: 'PAY_AT_VENUE', environment: 'MANUAL',
-              purpose: 'WALK_IN_BOOKING', status: 'DUE_AT_VENUE', amountPaisa: totalPaisa, currency: 'PKR',
-              bookingId: booking.id, idempotencyKey: `tournament:${created.id}:court:${court.id}`,
-            } });
-            await tx.paymentStatusAudit.create({ data: {
-              paymentId: payment.id, actorUserId: request.auth!.userId, previousStatus: null,
-              newStatus: 'DUE_AT_VENUE', amountPaisa: totalPaisa, reason: 'TOURNAMENT_COURT_RESERVATION_DUE_AT_VENUE',
-            } });
-          }
+            groundFeePaisa: 0, addOnsTotalPaisa: 0, totalPaisa: 0, currency: 'PKR', holdExpiresAt: null,
+          } });
         }
         return tx.tournament.findUniqueOrThrow({ where: { id: created.id }, include: {
           venue: { select: { id: true, name: true, city: true } },
@@ -759,6 +745,30 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
       } });
       if (!tournament) throw new HttpError(404, 'TOURNAMENT_NOT_FOUND', 'The tournament was not found.');
       response.status(200).json(apiSuccess({ ...tournament, startsAt: tournament.startsAt.toISOString(), endsAt: tournament.endsAt.toISOString(), createdAt: tournament.createdAt.toISOString(), updatedAt: tournament.updatedAt.toISOString() }));
+    } catch (error) { next(error); }
+  });
+
+  router.get('/tournaments/:tournamentId/teams/me', authenticate, playerOnly, async (request, response, next) => {
+    try {
+      const tournamentId = routeId(request, 'tournamentId');
+      const participant = await prisma.tournamentParticipant.findUnique({
+        where: { tournamentId_userId: { tournamentId, userId: request.auth!.userId } },
+      });
+      if (!participant) throw new HttpError(404, 'TEAM_NOT_FOUND', 'Your tournament team was not found.');
+      const payment = await prisma.payment.findFirst({
+        where: {
+          tournamentParticipantId: participant.id,
+          status: { in: ['PENDING', 'PROCESSING', 'DUE_AT_VENUE', 'AWAITING_TRANSFER', 'PROOF_SUBMITTED'] },
+        }, orderBy: { createdAt: 'desc' },
+        select: { id: true, method: true, status: true, amountPaisa: true, currency: true },
+      });
+      response.status(200).json(apiSuccess({
+        participant: {
+          id: participant.id, teamName: participant.teamName, teamMemberNames: participant.teamMemberNames,
+          paymentStatus: participant.paymentStatus, totalEntryFeePaisa: participant.totalEntryFeePaisa,
+        },
+        activePayment: payment,
+      }));
     } catch (error) { next(error); }
   });
 
