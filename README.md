@@ -252,6 +252,12 @@ For the React Native app, open the sibling [FYP_PlaySpot_React_Native_FE](/home/
 
 ## Integration setup and verification — November 21, 2026
 
+### Demo marketplace records
+
+Run `npm run seed:demo-marketplace` against a development database to create or refresh three fictional Pakistani vendors, six fictional players, public venues, courts, sport rentals, clearly marked fictional bank instructions, two completed tournaments with scores, one upcoming tournament, registered teams and player bookings. The script is idempotent, only writes accounts under `@demo.playspot.invalid`, and refuses to run when `NODE_ENV=production`.
+
+All seeded accounts use password `PlaySpotDemo2026!`. The script prints their login emails after a successful run. These are clearly labeled demo accounts and must not be used in production.
+
 - Backend `npm run setup` — passed. It installed 453 packages from the lockfile, validated and generated Prisma Client 7.10.1, found all five migrations applied, seeded six sports plus six amenities, and verified `playspot_user`, `playspot_migrator`, PostGIS and `btree_gist`.
 - Backend `npm run typecheck`, `npm run lint`, `npm test`, and `npm run build` — passed; 14 test files / 72 tests passed.
 - Backend HTTP smoke — `/health`, `/api/v1/health` and `/api/v1/sports` returned success. The live sports route returned Badminton, Basketball, Cricket, Football, Futsal and Padel. This confirms the registration error was caused by the previously empty active sports catalog; setup now seeds it and the API returns an actionable setup error if it is empty again.

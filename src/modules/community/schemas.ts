@@ -53,5 +53,6 @@ export const standingsSchema = z.object({
   results: z.array(z.object({ participantId: uuid, wins: z.number().int().min(0).max(1000), points: z.number().int().min(0).max(1_000_000) })).min(1).max(64),
 }).refine(value => new Set(value.results.map(result => result.participantId)).size === value.results.length, { path: ['results'], message: 'Participant results must be unique.' });
 export const tournamentCancelSchema = z.object({ reason: z.string().trim().max(300).optional() }).default({});
+export const tournamentRegistrationSchema = z.object({ open: z.boolean() }).strict();
 
 export const leaderboardQuerySchema = z.object({ sportId: uuid.optional(), limit: z.coerce.number().int().min(1).max(100).default(50) });

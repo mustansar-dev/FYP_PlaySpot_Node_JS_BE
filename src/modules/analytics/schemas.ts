@@ -10,7 +10,9 @@ const date = z.string().refine(validDate, 'Use a valid calendar date in YYYY-MM-
 
 export const analyticsQuerySchema = z.object({ from: date, to: date }).superRefine((value, context) => {
   if (value.from > value.to) context.addIssue({ code: 'custom', path: ['to'], message: 'End date must be on or after start date.' });
-  if (Date.parse(`${value.to}T00:00:00Z`) - Date.parse(`${value.from}T00:00:00Z`) > 366 * 86_400_000) {
-    context.addIssue({ code: 'custom', path: ['to'], message: 'The requested range cannot exceed 367 calendar days.' });
+  const oneYearAfterStart = new Date(`${value.from}T00:00:00.000Z`);
+  oneYearAfterStart.setUTCFullYear(oneYearAfterStart.getUTCFullYear() + 1);
+  if (Date.parse(`${value.to}T00:00:00.000Z`) > oneYearAfterStart.getTime()) {
+    context.addIssue({ code: 'custom', path: ['to'], message: 'The requested range cannot exceed one calendar year.' });
   }
 });

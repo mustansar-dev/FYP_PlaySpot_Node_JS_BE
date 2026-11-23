@@ -15,7 +15,7 @@ interface AuthRouterOptions { prisma: PrismaClient; accessSecret: string; refres
 const safeUserSelect = {
   id: true, role: true, name: true, email: true, phone: true, status: true,
   preferredSports: { select: { sport: { select: { code: true, name: true } } } },
-  vendorProfile: { select: { id: true, businessName: true, contactPhone: true, verificationStatus: true } },
+  vendorProfile: { select: { id: true, businessName: true, contactPhone: true, verificationStatus: true, createdAt: true } },
 } as const;
 
 function invalid(response: Response, issues: { path: PropertyKey[]; message: string }[]) {

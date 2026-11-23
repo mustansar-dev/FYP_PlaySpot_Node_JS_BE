@@ -30,7 +30,10 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR' } = {}) {
     ], messages: [], gameRoom: null, tournament: null,
   };
   const prisma = {
-    user: { findUnique: vi.fn(async () => ({ id: role === 'VENDOR' ? vendorId : playerId, role, status: 'ACTIVE' })) },
+    user: {
+      findUnique: vi.fn(async () => ({ id: role === 'VENDOR' ? vendorId : playerId, role, status: 'ACTIVE' })),
+      findMany: vi.fn(async () => [{ id: playerId, name: 'Player One' }]),
+    },
     venue: {
       findFirst: vi.fn(async () => ({ id: venueId, name: venue.name, vendorProfile: venue.vendorProfile })),
     },
@@ -57,6 +60,7 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR' } = {}) {
     gameRoomShare: { findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
     conversation: {
       findFirst: vi.fn(async () => null),
+      findUnique: vi.fn(async () => null),
       create: vi.fn(async () => conversation),
     },
     gameRoom: {
@@ -77,7 +81,14 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR' } = {}) {
     tournament: {
       create: vi.fn(async () => ({ id: '88888888-8888-4888-8888-888888888888' })),
       findUniqueOrThrow: vi.fn(async () => ({ id: '88888888-8888-4888-8888-888888888888' })),
+      findUnique: vi.fn(async () => null), findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: '88888888-8888-4888-8888-888888888888', status: 'UPCOMING', registrationOpen: data.registrationOpen })),
     },
+    tournamentParticipant: {
+      groupBy: vi.fn(async () => []), findMany: vi.fn(async () => []), findUnique: vi.fn(async () => null),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: '99999999-9999-4999-8999-999999999999', ...data })),
+    },
+    notification: { create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => data) },
     $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma)),
     $queryRaw: vi.fn(async () => []),
   };
@@ -90,6 +101,83 @@ function setup(options: { role?: 'PLAYER' | 'VENDOR' } = {}) {
 }
 
 describe('community venue conversations', () => {
+  it('reopens registration on the server for a future upcoming tournament owned by the vendor', async () => {
+    const { app, token, prisma } = setup({ role: 'VENDOR' });
+    const tournamentId = '88888888-8888-4888-8888-888888888888';
+    vi.mocked(prisma.tournament.findFirst).mockResolvedValueOnce({
+      id: tournamentId, status: 'UPCOMING', startsAt: new Date(Date.now() + 10 * 86_400_000),
+      maxTeams: 8, registrationOpen: false, participants: [],
+    } as never);
+    const response = await request(app).patch(`/api/v1/tournaments/${tournamentId}/registration`)
+      .set('Authorization', `Bearer ${token}`).send({ open: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.registrationOpen).toBe(true);
+    expect(prisma.tournament.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: tournamentId }, data: { registrationOpen: true },
+    }));
+  });
+
+  it('returns registered players and scores per sport on the common leaderboard', async () => {
+    const { app, prisma } = setup();
+    const badmintonTournamentId = '66666666-6666-4666-8666-666666666666';
+    const cricketTournamentId = '77777777-7777-4777-8777-777777777777';
+    vi.mocked(prisma.tournamentParticipant.groupBy).mockResolvedValueOnce([
+      { userId: playerId, tournamentId: badmintonTournamentId, _sum: { wins: 1, points: 5 } },
+      { userId: playerId, tournamentId: cricketTournamentId, _sum: { wins: 2, points: 8 } },
+    ] as never);
+    vi.mocked(prisma.tournament.findMany).mockResolvedValueOnce([
+      { id: badmintonTournamentId, sport: { id: sportId, name: 'Badminton' } },
+      { id: cricketTournamentId, sport: { id: '99999999-9999-4999-8999-999999999999', name: 'Cricket' } },
+    ] as never);
+    const response = await request(app).get('/api/v1/leaderboards?limit=50');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ userId: playerId, playerName: 'Player One', sport: 'Badminton', wins: 1, points: 5 }),
+      expect.objectContaining({ userId: playerId, playerName: 'Player One', sport: 'Cricket', wins: 2, points: 8 }),
+    ]));
+  });
+
+  it('notifies the player when a team registration commits', async () => {
+    const { app, token, prisma } = setup();
+    const tournamentId = '88888888-8888-4888-8888-888888888888';
+    vi.mocked(prisma.tournament.findUnique).mockResolvedValueOnce({
+      id: tournamentId, organizerUserId: vendorId, title: 'Lahore Cup', maxTeams: 8,
+      teamSize: 1, startsAt: new Date(Date.now() + 10 * 86_400_000), status: 'UPCOMING',
+      registrationOpen: true, entryFeePerPlayerPaisa: 0, participants: [],
+    } as never);
+    const response = await request(app).post(`/api/v1/tournaments/${tournamentId}/teams`)
+      .set('Authorization', `Bearer ${token}`).send({ teamName: 'Lahore Lions', teamMemberNames: [] });
+
+    expect(response.status).toBe(201);
+    expect(prisma.notification.create).toHaveBeenCalledTimes(2);
+    expect(prisma.notification.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      userId: playerId, type: 'TOURNAMENT', payload: expect.objectContaining({ tournamentId }),
+    }) }));
+  });
+
+  it('lists a player’s tournament registrations with server team counts for bookings refresh', async () => {
+    const { app, token, prisma } = setup();
+    const startsAt = new Date(Date.now() + 10 * 86_400_000);
+    vi.mocked(prisma.tournament.findMany).mockResolvedValueOnce([{
+      id: '88888888-8888-4888-8888-888888888888', title: 'Lahore Cup', startsAt,
+      endsAt: new Date(startsAt.getTime() + 3_600_000), createdAt: new Date(), updatedAt: new Date(),
+      status: 'UPCOMING', registrationOpen: true, maxTeams: 8, teamSize: 1,
+      registeredTeams: 1, _count: { participants: 1 }, participants: [{ userId: playerId, user: { id: playerId, name: 'Player One' } }],
+      venue: { id: venueId, name: 'PlaySpot Arena', city: 'Lahore' },
+      sport: { id: sportId, name: 'Badminton', code: 'badminton' }, organizer: { id: vendorId, name: 'Venue Owner' },
+      reservations: [],
+    }] as never);
+    const response = await request(app).get('/api/v1/tournaments/me').set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0]).toMatchObject({ id: '88888888-8888-4888-8888-888888888888', registeredTeams: 1, registrationOpen: true });
+    expect(prisma.tournament.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { participants: { some: { userId: playerId, status: 'REGISTERED' } } },
+    }));
+  });
+
   it('locks every selected tournament court and reserves it on the shared booking calendar', async () => {
     const { app, token, prisma } = setup({ role: 'VENDOR' });
     const tournamentId = '88888888-8888-4888-8888-888888888888';

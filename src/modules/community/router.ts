@@ -11,7 +11,7 @@ import { paisaToPKR } from '../bookings/service.js';
 import {
   leaderboardQuerySchema, messageCreateSchema, messageListQuerySchema, roomCreateSchema, roomJoinSchema,
   roomListQuerySchema, standingsSchema, tournamentCreateSchema,
-  tournamentCancelSchema, tournamentJoinSchema, tournamentListQuerySchema,
+  tournamentCancelSchema, tournamentJoinSchema, tournamentListQuerySchema, tournamentRegistrationSchema,
 } from './schemas.js';
 
 interface CommunityRouterOptions { prisma: PrismaClient; accessSecret: string; realtime: RealtimeHub; }
@@ -655,6 +655,28 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
     } catch (error) { next(error); }
   });
 
+  router.get('/tournaments/me', authenticate, playerOnly, async (request, response, next) => {
+    try {
+      const rows = await prisma.tournament.findMany({
+        where: { participants: { some: { userId: request.auth!.userId, status: 'REGISTERED' } } },
+        include: {
+          venue: { select: { id: true, name: true, city: true } },
+          sport: { select: { id: true, name: true, code: true } },
+          organizer: { select: { id: true, name: true } },
+          reservations: { where: { status: { not: 'CANCELLED' } }, include: { court: { select: { id: true, name: true } } }, orderBy: { startsAt: 'asc' } },
+          participants: { where: { status: 'REGISTERED' }, include: { user: { select: { id: true, name: true } } }, orderBy: [{ points: 'desc' }, { wins: 'desc' }, { joinedAt: 'asc' }] },
+          _count: { select: { participants: { where: { status: 'REGISTERED' } } } },
+        },
+        orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+      });
+      response.status(200).json(apiSuccess(rows.map(row => ({
+        ...row, startsAt: row.startsAt.toISOString(), endsAt: row.endsAt.toISOString(),
+        createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString(),
+        registeredTeams: row._count.participants,
+      }))));
+    } catch (error) { next(error); }
+  });
+
   router.post('/tournaments', authenticate, vendorOnly, async (request, response, next) => {
     const parsed = tournamentCreateSchema.safeParse(request.body);
     if (!parsed.success) { invalid(response, parsed.error.issues); return; }
@@ -779,7 +801,7 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
       const tournamentId = routeId(request, 'tournamentId');
       const participant = await prisma.$transaction(async tx => {
         await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "tournaments" WHERE "id" = ${tournamentId}::uuid FOR UPDATE`);
-        const tournament = await tx.tournament.findUnique({ where: { id: tournamentId }, select: { id: true, maxTeams: true, teamSize: true, startsAt: true, status: true, registrationOpen: true, entryFeePerPlayerPaisa: true, participants: { where: { status: 'REGISTERED' }, select: { id: true } } } });
+        const tournament = await tx.tournament.findUnique({ where: { id: tournamentId }, select: { id: true, organizerUserId: true, title: true, maxTeams: true, teamSize: true, startsAt: true, status: true, registrationOpen: true, entryFeePerPlayerPaisa: true, participants: { where: { status: 'REGISTERED' }, select: { id: true } } } });
         if (!tournament) throw new HttpError(404, 'TOURNAMENT_NOT_FOUND', 'The tournament was not found.');
         if (!tournament.registrationOpen || tournament.status !== 'UPCOMING' || tournament.startsAt <= new Date()) throw new HttpError(409, 'REGISTRATION_CLOSED', 'Tournament registration is closed.');
         if (tournament.participants.length >= tournament.maxTeams) throw new HttpError(409, 'TOURNAMENT_FULL', 'The tournament has reached its team limit.');
@@ -807,9 +829,45 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
           : await tx.tournamentParticipant.create({ data: { tournamentId, userId: request.auth!.userId, ...data } });
         const conversation = await tx.conversation.findUnique({ where: { tournamentId }, select: { id: true } });
         if (conversation) await tx.conversationMember.upsert({ where: { conversationId_userId: { conversationId: conversation.id, userId: request.auth!.userId } }, create: { conversationId: conversation.id, userId: request.auth!.userId }, update: {} });
+        await tx.notification.create({ data: {
+          userId: request.auth!.userId, type: 'TOURNAMENT', title: 'Team registration confirmed',
+          body: `Your team ${data.teamName} is registered for ${tournament.title}.`,
+          payload: { tournamentId, participantId: result.id },
+        } });
+        if (tournament.organizerUserId !== request.auth!.userId) await tx.notification.create({ data: {
+          userId: tournament.organizerUserId, type: 'TOURNAMENT', title: 'New team registered',
+          body: `${data.teamName} registered for ${tournament.title}.`,
+          payload: { tournamentId, participantId: result.id },
+        } });
         return result;
       });
       response.status(201).json(apiSuccess(participant));
+    } catch (error) { next(error); }
+  });
+
+  router.patch('/tournaments/:tournamentId/registration', authenticate, vendorOnly, async (request, response, next) => {
+    const parsed = tournamentRegistrationSchema.safeParse(request.body);
+    if (!parsed.success) { invalid(response, parsed.error.issues); return; }
+    try {
+      const tournamentId = routeId(request, 'tournamentId');
+      const updated = await prisma.$transaction(async tx => {
+        await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "tournaments" WHERE "id" = ${tournamentId}::uuid FOR UPDATE`);
+        const tournament = await tx.tournament.findFirst({
+          where: { id: tournamentId, organizerUserId: request.auth!.userId },
+          select: { id: true, status: true, startsAt: true, maxTeams: true, registrationOpen: true, participants: { where: { status: 'REGISTERED' }, select: { id: true } } },
+        });
+        if (!tournament) throw new HttpError(404, 'TOURNAMENT_NOT_FOUND', 'The tournament was not found.');
+        if (parsed.data.open) {
+          if (tournament.status !== 'UPCOMING' || tournament.startsAt <= new Date()) {
+            throw new HttpError(409, 'REGISTRATION_CANNOT_REOPEN', 'Registration can only be reopened before an upcoming tournament starts.');
+          }
+          if (tournament.participants.length >= tournament.maxTeams) {
+            throw new HttpError(409, 'TOURNAMENT_FULL', 'Registration cannot reopen because the tournament has reached capacity.');
+          }
+        }
+        return tx.tournament.update({ where: { id: tournamentId }, data: { registrationOpen: parsed.data.open } });
+      });
+      response.status(200).json(apiSuccess({ id: updated.id, status: updated.status, registrationOpen: updated.registrationOpen }));
     } catch (error) { next(error); }
   });
 
@@ -951,14 +1009,29 @@ export function createCommunityRouter({ prisma, accessSecret, realtime }: Commun
     if (!parsed.success) { invalid(response, parsed.error.issues); return; }
     try {
       const groups = await prisma.tournamentParticipant.groupBy({
-        by: ['userId'],
-        where: { status: 'REGISTERED', tournament: { status: 'COMPLETED', ...(parsed.data.sportId ? { sportId: parsed.data.sportId } : {}) } },
+        by: ['userId', 'tournamentId'],
+        where: { status: 'REGISTERED', tournament: { status: { not: 'CANCELLED' }, ...(parsed.data.sportId ? { sportId: parsed.data.sportId } : {}) } },
         _sum: { wins: true, points: true },
       });
-      const users = groups.length ? await prisma.user.findMany({ where: { id: { in: groups.map(row => row.userId) } }, select: { id: true, name: true } }) : [];
+      if (!groups.length) { response.status(200).json(apiSuccess([])); return; }
+      const [users, tournaments] = await Promise.all([
+        prisma.user.findMany({ where: { id: { in: [...new Set(groups.map(row => row.userId))] } }, select: { id: true, name: true } }),
+        prisma.tournament.findMany({ where: { id: { in: [...new Set(groups.map(row => row.tournamentId))] } }, select: { id: true, sport: { select: { id: true, name: true } } } }),
+      ]);
       const names = new Map(users.map(user => [user.id, user.name]));
-      const ordered = groups.map(group => ({ userId: group.userId, playerName: names.get(group.userId) ?? '', wins: group._sum.wins ?? 0, points: group._sum.points ?? 0 }))
-        .sort((a, b) => b.points - a.points || b.wins - a.wins || a.playerName.localeCompare(b.playerName) || a.userId.localeCompare(b.userId))
+      const sportByTournamentId = new Map(tournaments.map(tournament => [tournament.id, tournament.sport]));
+      const totals = new Map<string, { userId: string; playerName: string; sportId: string; sport: string; wins: number; points: number }>();
+      groups.forEach(group => {
+        const sport = sportByTournamentId.get(group.tournamentId);
+        if (!sport) return;
+        const key = `${group.userId}:${sport.id}`;
+        const current = totals.get(key) ?? { userId: group.userId, playerName: names.get(group.userId) ?? '', sportId: sport.id, sport: sport.name, wins: 0, points: 0 };
+        current.wins += group._sum.wins ?? 0;
+        current.points += group._sum.points ?? 0;
+        totals.set(key, current);
+      });
+      const ordered = [...totals.values()]
+        .sort((a, b) => a.sport.localeCompare(b.sport) || b.points - a.points || b.wins - a.wins || a.playerName.localeCompare(b.playerName) || a.userId.localeCompare(b.userId))
         .slice(0, parsed.data.limit).map((item, index) => ({ rank: index + 1, ...item }));
       response.status(200).json(apiSuccess(ordered));
     } catch (error) { next(error); }
