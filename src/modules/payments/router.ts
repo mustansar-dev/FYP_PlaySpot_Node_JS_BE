@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import multer, { MulterError } from 'multer';
 import { Router, type Request, type Response } from 'express';
 import { Prisma, type PaymentMethod, type PrismaClient } from '../../generated/prisma/client.js';
 import { apiError, apiSuccess } from '../../common/apiResponse.js';
@@ -15,7 +16,7 @@ import {
   receiptConfirmSchema, receiptUploadSchema, rejectTransferSchema, transferListQuerySchema,
 } from './schemas.js';
 import {
-  MAX_RECEIPT_BYTES, UnconfiguredPaymentReceiptStorage, validateReceiptFile,
+  MAX_RECEIPT_BYTES, UnconfiguredPaymentReceiptStorage, validateReceiptContent, validateReceiptFile,
   type PaymentReceiptStorage,
 } from './storage.js';
 
@@ -116,6 +117,64 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+async function recordReceipt(prisma: PrismaClient, storage: PaymentReceiptStorage, input: {
+  paymentId: string; userId: string; fileName: string; mimeType: string; sizeBytes: number; storagePath: string;
+}) {
+  const initial = await loadPayment(prisma, input.paymentId);
+  if (initial.userId !== input.userId || initial.method !== 'BANK_TRANSFER') {
+    throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
+  }
+  if (!['AWAITING_TRANSFER', 'REJECTED'].includes(initial.status)) {
+    throw new HttpError(409, 'RECEIPT_UPLOAD_NOT_ALLOWED', 'A receipt cannot be submitted in the current payment state.');
+  }
+  const extension = validateReceiptFile(input);
+  const expectedPrefix = `${input.userId}/${input.paymentId}/`;
+  if (!input.storagePath.startsWith(expectedPrefix) || input.storagePath.includes('..')
+    || !input.storagePath.toLowerCase().endsWith(extension)) {
+    throw new HttpError(400, 'INVALID_RECEIPT_PATH', 'The receipt object path is not valid for this payment.');
+  }
+  const objectInfo = await storage.getObjectInfo(input.storagePath);
+  if (!objectInfo.exists) throw new HttpError(409, 'RECEIPT_NOT_UPLOADED', 'The receipt file has not been uploaded.');
+  if (objectInfo.sizeBytes === undefined || objectInfo.sizeBytes !== input.sizeBytes || objectInfo.sizeBytes > MAX_RECEIPT_BYTES) {
+    throw new HttpError(400, 'RECEIPT_SIZE_MISMATCH', 'The uploaded receipt size does not match the confirmed file metadata.');
+  }
+  const actualSizeBytes = objectInfo.sizeBytes;
+  if (!objectInfo.mimeType || objectInfo.mimeType.toLowerCase() !== input.mimeType) {
+    throw new HttpError(400, 'RECEIPT_TYPE_MISMATCH', 'The uploaded receipt content type does not match the confirmed file type.');
+  }
+  const now = new Date();
+  return prisma.$transaction(async tx => {
+    await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "payments" WHERE "id" = ${input.paymentId}::uuid FOR UPDATE`);
+    const payment = await tx.payment.findUnique({ where: { id: input.paymentId }, include: paymentDetailsInclude });
+    if (!payment || payment.userId !== input.userId) throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
+    if (!['AWAITING_TRANSFER', 'REJECTED'].includes(payment.status)) {
+      throw new HttpError(409, 'RECEIPT_UPLOAD_NOT_ALLOWED', 'A receipt has already been submitted for review.');
+    }
+    if (payment.receipts.length >= MAX_RECEIPT_ATTEMPTS) {
+      throw new HttpError(409, 'RECEIPT_ATTEMPT_LIMIT', 'The maximum number of transfer receipt submissions has been reached.');
+    }
+    if (!paymentTargetIsOpen(payment, now)) throw new HttpError(409, 'PAYMENT_TARGET_CLOSED', 'This booking or tournament is no longer accepting transfer receipts.');
+    const booking = relatedBooking(payment);
+    const previousStatus = payment.status;
+    const receipt = await tx.paymentReceipt.create({ data: {
+      paymentId: input.paymentId, storagePath: input.storagePath,
+      fileName: input.fileName.replace(/[\\/]/g, '_'), mimeType: input.mimeType,
+      sizeBytes: actualSizeBytes, status: 'SUBMITTED',
+    } });
+    await tx.payment.update({ where: { id: input.paymentId }, data: { status: 'PROOF_SUBMITTED' } });
+    await tx.paymentStatusAudit.create({ data: {
+      paymentId: input.paymentId, actorUserId: input.userId, previousStatus, newStatus: 'PROOF_SUBMITTED',
+      amountPaisa: payment.amountPaisa, reason: 'BANK_TRANSFER_RECEIPT_SUBMITTED',
+    } });
+    if (booking?.status === 'PENDING_PAYMENT') {
+      await tx.booking.update({ where: { id: booking.id }, data: { holdExpiresAt: new Date(now.getTime() + RECEIPT_REVIEW_HOLD_MS), paymentStatus: 'PENDING' } });
+    }
+    const fresh = await tx.payment.findUnique({ where: { id: input.paymentId }, include: paymentDetailsInclude });
+    if (!fresh) throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
+    return { payment: fresh, receiptId: receipt.id };
+  });
+}
+
 function parseSafepayAmount(value: unknown): number | undefined {
   if (typeof value !== 'string' && typeof value !== 'number') return undefined;
   const text = String(value);
@@ -143,6 +202,28 @@ export function createPaymentRouter({
   const authenticate = requireAuth(prisma, accessSecret);
   const playerOnly = requireRole('PLAYER');
   const vendorOnly = requireRole('VENDOR');
+  const multipartReceipt = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_RECEIPT_BYTES, files: 1, fields: 0, parts: 1 },
+    fileFilter: (_request, file, callback) => {
+      if (!['application/pdf', 'image/jpeg', 'image/png'].includes(file.mimetype.toLowerCase())) {
+        callback(new HttpError(400, 'UNSUPPORTED_RECEIPT_TYPE', 'Only PDF, JPEG and PNG receipts are accepted.'));
+        return;
+      }
+      callback(null, true);
+    },
+  }).single('receipt');
+  const parseMultipartReceipt = (request: Request, response: Response, next: (error?: unknown) => void) => {
+    multipartReceipt(request, response, error => {
+      if (error instanceof MulterError) {
+        next(error.code === 'LIMIT_FILE_SIZE'
+          ? new HttpError(413, 'RECEIPT_TOO_LARGE', 'A receipt may not exceed 5 MB.')
+          : new HttpError(400, 'INVALID_RECEIPT_UPLOAD', 'The receipt upload must contain exactly one file.'));
+        return;
+      }
+      next(error);
+    });
+  };
 
   async function requireVendorOwnedPayment(paymentId: string, vendorUserId: string): Promise<PaymentDetails> {
     const payment = await loadPayment(prisma, paymentId);
@@ -437,6 +518,22 @@ export function createPaymentRouter({
     }
   });
 
+  router.get('/vendors/me/payment-instructions', authenticate, vendorOnly, async (request, response, next) => {
+    try {
+      const vendor = await prisma.vendorProfile.findUnique({ where: { ownerUserId: request.auth!.userId }, select: { id: true } });
+      if (!vendor) throw new HttpError(404, 'VENDOR_PROFILE_NOT_FOUND', 'The vendor profile was not found.');
+      const instructions = await prisma.vendorPaymentInstructions.findFirst({ where: { vendorProfileId: vendor.id } });
+      response.status(200).json(apiSuccess(instructions ? {
+        configured: true, accountTitle: instructions.accountTitle, bankName: instructions.bankName,
+        iban: instructions.iban, accountNumber: instructions.accountNumber,
+        instructions: instructions.instructions, active: instructions.active,
+      } : {
+        configured: false, accountTitle: '', bankName: '', iban: null, accountNumber: null,
+        instructions: null, active: true,
+      }));
+    } catch (error) { next(mapPaymentError(error)); }
+  });
+
   router.put('/vendors/me/payment-instructions', authenticate, vendorOnly, async (request, response, next) => {
     const parsed = paymentInstructionsSchema.safeParse(request.body);
     if (!parsed.success) { invalid(response, parsed.error.issues); return; }
@@ -463,6 +560,23 @@ export function createPaymentRouter({
         instructions: instructions.instructions, active: instructions.active,
       }));
     } catch (error) { next(error); }
+  });
+
+  router.get('/venues/:venueId/payment-instructions', authenticate, playerOnly, async (request, response, next) => {
+    try {
+      const venueId = routeId(request, 'venueId');
+      const venue = await prisma.venue.findFirst({
+        where: { id: venueId, published: true, deletedAt: null },
+        select: { vendorProfileId: true },
+      });
+      if (!venue) throw new HttpError(404, 'VENUE_NOT_FOUND', 'The venue was not found.');
+      const instructions = await prisma.vendorPaymentInstructions.findFirst({ where: { vendorProfileId: venue.vendorProfileId, active: true } });
+      if (!instructions) throw new HttpError(404, 'BANK_INSTRUCTIONS_NOT_CONFIGURED', 'This venue has not configured active bank transfer instructions.');
+      response.status(200).json(apiSuccess({
+        bankName: instructions.bankName, accountTitle: instructions.accountTitle,
+        iban: instructions.iban, accountNumber: instructions.accountNumber, instructions: instructions.instructions,
+      }));
+    } catch (error) { next(mapPaymentError(error)); }
   });
 
   router.get('/bookings/:bookingId/payment-instructions', authenticate, playerOnly, async (request, response, next) => {
@@ -674,60 +788,45 @@ export function createPaymentRouter({
     if (!parsed.success) { invalid(response, parsed.error.issues); return; }
     try {
       const paymentId = routeId(request, 'paymentId');
-      const initial = await loadPayment(prisma, paymentId);
-      if (initial.userId !== request.auth!.userId || initial.method !== 'BANK_TRANSFER') {
-        throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
-      }
-      if (!['AWAITING_TRANSFER', 'REJECTED'].includes(initial.status)) {
-        throw new HttpError(409, 'RECEIPT_UPLOAD_NOT_ALLOWED', 'A receipt cannot be submitted in the current payment state.');
-      }
-      const expectedPrefix = `${request.auth!.userId}/${paymentId}/`;
-      const extension = validateReceiptFile(parsed.data);
-      if (!parsed.data.storagePath.startsWith(expectedPrefix) || parsed.data.storagePath.includes('..')
-        || !parsed.data.storagePath.toLowerCase().endsWith(extension)) {
-        throw new HttpError(400, 'INVALID_RECEIPT_PATH', 'The receipt object path is not valid for this payment.');
-      }
-      const objectInfo = await storage.getObjectInfo(parsed.data.storagePath);
-      if (!objectInfo.exists) throw new HttpError(409, 'RECEIPT_NOT_UPLOADED', 'The receipt file has not been uploaded.');
-      const actualSizeBytes = objectInfo.sizeBytes;
-      if (actualSizeBytes === undefined || actualSizeBytes !== parsed.data.sizeBytes || actualSizeBytes > MAX_RECEIPT_BYTES) {
-        throw new HttpError(400, 'RECEIPT_SIZE_MISMATCH', 'The uploaded receipt size does not match the confirmed file metadata.');
-      }
-      if (!objectInfo.mimeType || objectInfo.mimeType.toLowerCase() !== parsed.data.mimeType) {
-        throw new HttpError(400, 'RECEIPT_TYPE_MISMATCH', 'The uploaded receipt content type does not match the confirmed file type.');
-      }
-      const now = new Date();
-      const result = await prisma.$transaction(async tx => {
-        await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`SELECT "id" FROM "payments" WHERE "id" = ${paymentId}::uuid FOR UPDATE`);
-        const payment = await tx.payment.findUnique({ where: { id: paymentId }, include: paymentDetailsInclude });
-        if (!payment || payment.userId !== request.auth!.userId) throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
-        if (!['AWAITING_TRANSFER', 'REJECTED'].includes(payment.status)) {
-          throw new HttpError(409, 'RECEIPT_UPLOAD_NOT_ALLOWED', 'A receipt has already been submitted for review.');
-        }
-        if (payment.receipts.length >= MAX_RECEIPT_ATTEMPTS) {
-          throw new HttpError(409, 'RECEIPT_ATTEMPT_LIMIT', 'The maximum number of transfer receipt submissions has been reached.');
-        }
-        if (!paymentTargetIsOpen(payment, now)) throw new HttpError(409, 'PAYMENT_TARGET_CLOSED', 'This booking or tournament is no longer accepting transfer receipts.');
-        const booking = relatedBooking(payment);
-        const previousStatus = payment.status;
-        const receipt = await tx.paymentReceipt.create({ data: {
-          paymentId, storagePath: parsed.data.storagePath, fileName: parsed.data.fileName.replace(/[\\/]/g, '_'),
-          mimeType: parsed.data.mimeType, sizeBytes: actualSizeBytes, status: 'SUBMITTED',
-        } });
-        await tx.payment.update({ where: { id: paymentId }, data: { status: 'PROOF_SUBMITTED' } });
-        await tx.paymentStatusAudit.create({ data: {
-          paymentId, actorUserId: request.auth!.userId, previousStatus, newStatus: 'PROOF_SUBMITTED',
-          amountPaisa: payment.amountPaisa, reason: 'BANK_TRANSFER_RECEIPT_SUBMITTED',
-        } });
-        if (booking?.status === 'PENDING_PAYMENT') {
-          await tx.booking.update({ where: { id: booking.id }, data: { holdExpiresAt: new Date(now.getTime() + RECEIPT_REVIEW_HOLD_MS), paymentStatus: 'PENDING' } });
-        }
-        const fresh = await tx.payment.findUnique({ where: { id: paymentId }, include: paymentDetailsInclude });
-        if (!fresh) throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
-        return { payment: fresh, receiptId: receipt.id };
+      const result = await recordReceipt(prisma, storage, {
+        ...parsed.data, paymentId, userId: request.auth!.userId,
       });
       response.status(201).json(apiSuccess({ payment: paymentDto(result.payment), receiptId: result.receiptId, reviewStatus: 'SUBMITTED' }));
     } catch (error) { next(mapPaymentError(error)); }
+  });
+
+  router.post('/payments/:paymentId/receipt/upload', authenticate, playerOnly, parseMultipartReceipt, async (request, response, next) => {
+    let storagePath: string | undefined;
+    try {
+      const paymentId = routeId(request, 'paymentId');
+      const file = request.file;
+      if (!file) throw new HttpError(400, 'RECEIPT_FILE_REQUIRED', 'Choose one receipt file to upload.');
+      const fileName = file.originalname.replace(/[\\/]/g, '_').slice(-255) || 'transfer-receipt';
+      const input = { payerUserId: request.auth!.userId, paymentId, fileName, mimeType: file.mimetype.toLowerCase(), sizeBytes: file.size };
+      validateReceiptFile(input);
+      validateReceiptContent(file.buffer, input.mimeType);
+      const payment = await loadPayment(prisma, paymentId);
+      if (payment.userId !== request.auth!.userId || payment.method !== 'BANK_TRANSFER') {
+        throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
+      }
+      if (!['AWAITING_TRANSFER', 'REJECTED'].includes(payment.status)) {
+        throw new HttpError(409, 'RECEIPT_UPLOAD_NOT_ALLOWED', 'A receipt cannot be submitted in the current payment state.');
+      }
+      if (!paymentTargetIsOpen(payment)) throw new HttpError(409, 'PAYMENT_TARGET_CLOSED', 'This booking or tournament is no longer accepting transfer receipts.');
+      if (!storage.storeUploadedFile) {
+        throw new HttpError(503, 'PAYMENT_RECEIPT_STORAGE_NOT_CONFIGURED', 'Private payment receipt storage is not configured for multipart uploads.');
+      }
+      const stored = await storage.storeUploadedFile({ ...input, buffer: file.buffer });
+      storagePath = stored.storagePath;
+      const result = await recordReceipt(prisma, storage, {
+        paymentId, userId: request.auth!.userId, fileName, mimeType: input.mimeType,
+        sizeBytes: input.sizeBytes, storagePath,
+      });
+      response.status(201).json(apiSuccess({ payment: paymentDto(result.payment), receiptId: result.receiptId, reviewStatus: 'SUBMITTED' }));
+    } catch (error) {
+      if (storagePath) await storage.deleteObject(storagePath).catch(() => {});
+      next(mapPaymentError(error));
+    }
   });
 
   router.get('/payments/:paymentId/receipt', authenticate, async (request, response, next) => {
@@ -743,6 +842,28 @@ export function createPaymentRouter({
         signedUrl, expiresInSeconds: 300,
         receipt: { id: receipt.id, fileName: receipt.fileName, mimeType: receipt.mimeType, sizeBytes: receipt.sizeBytes, status: receipt.status },
       }));
+    } catch (error) { next(error); }
+  });
+
+  router.get('/payments/:paymentId/receipt/file', authenticate, async (request, response, next) => {
+    try {
+      const payment = await loadPayment(prisma, routeId(request, 'paymentId'));
+      if (!mayReadPayment(payment, request.auth!.userId, request.auth!.role)) {
+        throw new HttpError(404, 'PAYMENT_NOT_FOUND', 'The payment was not found.');
+      }
+      const receipt = payment.receipts[0];
+      if (!receipt) throw new HttpError(404, 'RECEIPT_NOT_FOUND', 'The payment has no submitted receipt.');
+      if (!storage.readObject) {
+        response.redirect(303, await storage.createSignedDownload(receipt.storagePath, 300));
+        return;
+      }
+      const contents = await storage.readObject(receipt.storagePath);
+      response.set({
+        'Cache-Control': 'private, no-store',
+        'Content-Disposition': `inline; filename="${receipt.fileName.replace(/["\\\\]/g, '_')}"`,
+        'X-Content-Type-Options': 'nosniff',
+      });
+      response.status(200).type(receipt.mimeType).send(contents);
     } catch (error) { next(error); }
   });
 

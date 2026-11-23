@@ -4,7 +4,7 @@ import { disconnectPrismaClient, getPrismaClient } from './database/prisma.js';
 import { createApp } from './app.js';
 import { SupabaseVenueStorage } from './modules/venues/storage.js';
 import { createPaymentGateway } from './integrations/payments/provider.js';
-import { SupabasePaymentReceiptStorage } from './modules/payments/storage.js';
+import { LocalPaymentReceiptStorage, SupabasePaymentReceiptStorage } from './modules/payments/storage.js';
 import { RealtimeHub } from './realtime/hub.js';
 import { attachSocketServer } from './realtime/socket.js';
 
@@ -55,6 +55,8 @@ async function main(): Promise<void> {
         storage: new SupabasePaymentReceiptStorage(
           config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, config.PAYMENT_RECEIPTS_BUCKET,
         ),
+      } : config.NODE_ENV === 'development' ? {
+        storage: new LocalPaymentReceiptStorage(config.PAYMENT_RECEIPTS_LOCAL_DIR),
       } : {}),
     },
     community: { prisma, accessSecret: config.JWT_ACCESS_SECRET!, realtime },

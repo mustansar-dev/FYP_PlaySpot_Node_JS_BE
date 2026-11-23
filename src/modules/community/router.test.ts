@@ -162,8 +162,12 @@ describe('community venue conversations', () => {
       slotDurationMinutes: 60, openingTime: '09:00', closingTime: '17:00', availableDays: ['Sat'],
       venue: { id: venueId, timeZone: 'Asia/Karachi' },
     } as never);
-    const startsAt = '2026-11-21T06:00:00.000Z';
-    const endsAt = '2026-11-21T07:00:00.000Z';
+    const eventDate = new Date();
+    eventDate.setUTCDate(eventDate.getUTCDate() + 7);
+    while (eventDate.getUTCDay() !== 6) eventDate.setUTCDate(eventDate.getUTCDate() + 1);
+    const dateKey = eventDate.toISOString().slice(0, 10);
+    const startsAt = `${dateKey}T06:00:00.000Z`;
+    const endsAt = `${dateKey}T07:00:00.000Z`;
     const response = await request(app).post('/api/v1/game-rooms').set('Authorization', `Bearer ${token}`).send({
       sportId, venueId, courtId: '66666666-6666-4666-8666-666666666666', title: 'Badminton tonight',
       locationLabel: 'PlaySpot Arena', startsAt, endsAt, capacity: 4, visibility: 'PRIVATE', paymentMode: 'PAY_AT_VENUE',

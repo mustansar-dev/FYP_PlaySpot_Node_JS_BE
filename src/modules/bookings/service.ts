@@ -4,6 +4,7 @@ import { utcInstantToLocal } from './schedule.js';
 export const bookingDetailsInclude = {
   venue: { select: { name: true } },
   court: { select: { name: true } },
+  customer: { select: { id: true, name: true } },
   items: true,
   payments: { select: { id: true, userId: true, method: true, status: true, amountPaisa: true, purpose: true } },
   participants: {
@@ -47,6 +48,7 @@ export function bookingDto(booking: BookingDetails) {
     timeZone: booking.timeZone,
     durationMinutes,
     customerUserId: booking.customerUserId,
+    playerName: booking.customer?.name ?? booking.customerName ?? null,
     createdByUserId: booking.createdByUserId,
     customerName: booking.customerName,
     customerPhone: booking.customerPhone,

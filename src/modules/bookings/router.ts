@@ -92,7 +92,7 @@ function dayNameMatches(availableDays: string[], weekday: string): boolean {
 }
 
 async function reserveEquipment(tx: Prisma.TransactionClient, input: {
-  venueId: string; startsAt: Date; endsAt: Date; equipmentIds: string[];
+  venueId: string; courtSportId: string; startsAt: Date; endsAt: Date; equipmentIds: string[];
   selections: Array<{ equipmentId: string; quantity: number }>; now: Date;
 }) {
   if (!input.equipmentIds.length) return [];
@@ -104,7 +104,7 @@ async function reserveEquipment(tx: Prisma.TransactionClient, input: {
   `);
   const items = await tx.equipmentItem.findMany({
     where: { id: { in: input.equipmentIds }, venueId: input.venueId, active: true },
-    select: { id: true, name: true, priceMode: true, unitPricePaisa: true, quantityAvailable: true },
+    select: { id: true, name: true, sportId: true, priceMode: true, unitPricePaisa: true, quantityAvailable: true },
   });
   if (items.length !== input.equipmentIds.length) {
     throw new HttpError(400, 'ADDON_UNAVAILABLE', 'An add-on is no longer available at this venue.');
@@ -128,6 +128,9 @@ async function reserveEquipment(tx: Prisma.TransactionClient, input: {
   const itemById = new Map(items.map(item => [item.id, item]));
   return input.selections.map(selection => {
     const item = itemById.get(selection.equipmentId)!;
+    if (item.sportId && item.sportId !== input.courtSportId) {
+      throw new HttpError(400, 'ADDON_SPORT_MISMATCH', `${item.name} is only available for its matching sport.`);
+    }
     const totalReserved = reservedById.get(item.id) ?? 0;
     if (totalReserved + selection.quantity > item.quantityAvailable) {
       throw new HttpError(409, 'ADDON_STOCK_UNAVAILABLE', `${item.name} is no longer available in that quantity.`);
@@ -229,7 +232,7 @@ export function createBookingRouter({ prisma, accessSecret, onlineProvider }: Bo
         const court = await tx.court.findFirst({
           where: { id: input.courtId, isActive: true, venue: { deletedAt: null, published: true } },
           select: {
-            id: true, venueId: true, name: true, openingTime: true, closingTime: true, availableDays: true,
+            id: true, venueId: true, name: true, sportId: true, openingTime: true, closingTime: true, availableDays: true,
             slotDurationMinutes: true, hourlyPricePaisa: true,
             venue: { select: { timeZone: true } },
           },
@@ -278,7 +281,7 @@ export function createBookingRouter({ prisma, accessSecret, onlineProvider }: Bo
         }
 
         const lines = await reserveEquipment(tx, {
-          venueId: court.venueId, startsAt: start, endsAt: end,
+          venueId: court.venueId, courtSportId: court.sportId, startsAt: start, endsAt: end,
           equipmentIds: input.addOns.map(item => item.equipmentId), selections: input.addOns, now,
         });
         const durationMinutes = endMinute - startMinute;
@@ -372,7 +375,7 @@ export function createBookingRouter({ prisma, accessSecret, onlineProvider }: Bo
         const court = await tx.court.findFirst({
           where: { id: input.courtId, isActive: true, venue: { deletedAt: null, vendorProfile: { ownerUserId: userId } } },
           select: {
-            id: true, venueId: true, name: true, openingTime: true, closingTime: true, availableDays: true,
+            id: true, venueId: true, name: true, sportId: true, openingTime: true, closingTime: true, availableDays: true,
             slotDurationMinutes: true, hourlyPricePaisa: true, venue: { select: { timeZone: true } },
           },
         });
@@ -406,7 +409,7 @@ export function createBookingRouter({ prisma, accessSecret, onlineProvider }: Bo
         });
         if (conflict) throw new HttpError(409, 'SLOT_UNAVAILABLE', 'That court time is no longer available.');
         const lines = await reserveEquipment(tx, {
-          venueId: court.venueId, startsAt: start, endsAt: end,
+          venueId: court.venueId, courtSportId: court.sportId, startsAt: start, endsAt: end,
           equipmentIds: input.addOns.map(item => item.equipmentId), selections: input.addOns, now,
         });
         const durationMinutes = endMinute - startMinute;

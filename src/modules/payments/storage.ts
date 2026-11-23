@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { basename, extname } from 'node:path';
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { basename, extname, relative, resolve, sep } from 'node:path';
 import { HttpError } from '../../common/httpError.js';
 
 export const MAX_RECEIPT_BYTES = 5 * 1024 * 1024;
@@ -26,8 +27,10 @@ export interface SignedReceiptUpload {
 
 export interface PaymentReceiptStorage {
   createSignedUpload(input: ReceiptUploadRequest): Promise<SignedReceiptUpload>;
+  storeUploadedFile?(input: ReceiptUploadRequest & { buffer: Buffer }): Promise<{ storagePath: string }>;
   getObjectInfo(storagePath: string): Promise<{ exists: boolean; sizeBytes?: number; mimeType?: string }>;
   createSignedDownload(storagePath: string, expiresInSeconds: number): Promise<string>;
+  readObject?(storagePath: string): Promise<Buffer>;
   deleteObject(storagePath: string): Promise<void>;
 }
 
@@ -45,6 +48,99 @@ export function validateReceiptFile(input: Pick<ReceiptUploadRequest, 'fileName'
     throw new HttpError(400, 'RECEIPT_EXTENSION_MISMATCH', 'The file extension does not match its content type.');
   }
   return extension;
+}
+
+export function validateReceiptContent(buffer: Buffer, mimeType: string): void {
+  const isPdf = mimeType === 'application/pdf' && buffer.subarray(0, 5).toString('ascii') === '%PDF-';
+  const isJpeg = mimeType === 'image/jpeg' && buffer.length >= 3
+    && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const isPng = mimeType === 'image/png' && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  if (!isPdf && !isJpeg && !isPng) {
+    throw new HttpError(400, 'INVALID_RECEIPT_CONTENT', 'The receipt file content does not match its PDF, JPEG or PNG type.');
+  }
+}
+
+export class LocalPaymentReceiptStorage implements PaymentReceiptStorage {
+  private readonly root: string;
+
+  constructor(directory: string) {
+    this.root = resolve(directory);
+  }
+
+  async createSignedUpload(): Promise<SignedReceiptUpload> {
+    throw new HttpError(409, 'MULTIPART_UPLOAD_REQUIRED', 'Upload payment receipts with the authenticated multipart receipt endpoint.');
+  }
+
+  async storeUploadedFile(input: ReceiptUploadRequest & { buffer: Buffer }): Promise<{ storagePath: string }> {
+    const extension = validateReceiptFile(input);
+    if (input.buffer.length !== input.sizeBytes) throw new HttpError(400, 'RECEIPT_SIZE_MISMATCH', 'The uploaded receipt size does not match its metadata.');
+    validateReceiptContent(input.buffer, input.mimeType);
+    const storagePath = `${input.payerUserId}/${input.paymentId}/${randomUUID()}${extension}`;
+    const filePath = this.filePath(storagePath);
+    await mkdir(resolve(filePath, '..'), { recursive: true, mode: 0o700 });
+    await writeFile(filePath, input.buffer, { flag: 'wx', mode: 0o600 });
+    return { storagePath };
+  }
+
+  async getObjectInfo(storagePath: string): Promise<{ exists: boolean; sizeBytes?: number; mimeType?: string }> {
+    try {
+      const file = await stat(this.filePath(storagePath));
+      if (!file.isFile()) return { exists: false };
+      const mimeType = mimeTypeForExtension(extname(storagePath).toLowerCase());
+      return { exists: true, sizeBytes: file.size, ...(mimeType ? { mimeType } : {}) };
+    } catch (error) {
+      if (isMissingFile(error)) return { exists: false };
+      throw error;
+    }
+  }
+
+  async createSignedDownload(storagePath: string, expiresInSeconds: number): Promise<string> {
+    if (!Number.isFinite(expiresInSeconds) || expiresInSeconds < 1) {
+      throw new HttpError(400, 'INVALID_RECEIPT_LINK_EXPIRY', 'A positive receipt link duration is required.');
+    }
+    const [, paymentId] = this.checkedSegments(storagePath);
+    return `/payments/${paymentId}/receipt/file`;
+  }
+
+  async readObject(storagePath: string): Promise<Buffer> {
+    try { return await readFile(this.filePath(storagePath)); }
+    catch (error) {
+      if (isMissingFile(error)) throw new HttpError(404, 'RECEIPT_NOT_FOUND', 'The payment receipt file was not found.');
+      throw error;
+    }
+  }
+
+  async deleteObject(storagePath: string): Promise<void> {
+    try { await unlink(this.filePath(storagePath)); }
+    catch (error) { if (!isMissingFile(error)) throw error; }
+  }
+
+  private filePath(storagePath: string): string {
+    const result = resolve(this.root, ...this.checkedSegments(storagePath));
+    const pathFromRoot = relative(this.root, result);
+    if (!pathFromRoot || pathFromRoot.startsWith(`..${sep}`) || pathFromRoot === '..' || resolve(this.root, pathFromRoot) !== result) {
+      throw new HttpError(400, 'INVALID_RECEIPT_PATH', 'The receipt object path is not valid.');
+    }
+    return result;
+  }
+
+  private checkedSegments(storagePath: string): [string, string, string] {
+    const segments = storagePath.split('/');
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (segments.length !== 3 || !uuid.test(segments[0]!) || !uuid.test(segments[1]!)
+      || !/^[0-9a-f-]{36}\.(?:pdf|jpg|png)$/i.test(segments[2]!)) {
+      throw new HttpError(400, 'INVALID_RECEIPT_PATH', 'The receipt object path is not valid.');
+    }
+    return segments as [string, string, string];
+  }
+}
+
+function mimeTypeForExtension(extension: string): string | undefined {
+  return { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.png': 'image/png' }[extension];
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
 export class SupabasePaymentReceiptStorage implements PaymentReceiptStorage {
@@ -67,6 +163,16 @@ export class SupabasePaymentReceiptStorage implements PaymentReceiptStorage {
     const uploadUrl = new URL(signedUrl);
     uploadUrl.searchParams.set('token', data.token);
     return { storagePath, signedUrl: uploadUrl.toString(), token: data.token, expiresInSeconds: 7200 };
+  }
+
+  async storeUploadedFile(input: ReceiptUploadRequest & { buffer: Buffer }): Promise<{ storagePath: string }> {
+    const upload = await this.createSignedUpload(input);
+    const response = await fetch(upload.signedUrl, {
+      method: 'PUT', headers: { 'Content-Type': input.mimeType }, body: input.buffer,
+      signal: AbortSignal.timeout(8000),
+    }).catch(() => { throw this.providerError(); });
+    if (!response.ok) throw this.providerError();
+    return { storagePath: upload.storagePath };
   }
 
   async getObjectInfo(storagePath: string): Promise<{ exists: boolean; sizeBytes?: number; mimeType?: string }> {
@@ -124,6 +230,9 @@ export class SupabasePaymentReceiptStorage implements PaymentReceiptStorage {
 
 export class UnconfiguredPaymentReceiptStorage implements PaymentReceiptStorage {
   async createSignedUpload(): Promise<SignedReceiptUpload> {
+    throw new HttpError(503, 'PAYMENT_RECEIPT_STORAGE_NOT_CONFIGURED', 'Private payment receipt storage is not configured.');
+  }
+  async storeUploadedFile(): Promise<{ storagePath: string }> {
     throw new HttpError(503, 'PAYMENT_RECEIPT_STORAGE_NOT_CONFIGURED', 'Private payment receipt storage is not configured.');
   }
   async getObjectInfo(): Promise<{ exists: boolean; sizeBytes?: number; mimeType?: string }> {

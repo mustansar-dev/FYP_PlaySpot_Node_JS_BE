@@ -33,6 +33,7 @@ const envSchema = z.object({
   SAFEPAY_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
   PAYMENT_PROVIDER: z.enum(['safepay', 'development_mock']).default('safepay'),
   PAYMENT_RECEIPTS_BUCKET: z.string().trim().min(1).max(100).default('payment-receipts'),
+  PAYMENT_RECEIPTS_LOCAL_DIR: z.string().trim().min(1).default('./.data/payment-receipts'),
   SAFEPAY_SECRET_KEY: z.string().optional(),
   SAFEPAY_API_KEY: z.string().optional(),
   SAFEPAY_WEBHOOK_SECRET: z.string().optional(),

@@ -56,6 +56,7 @@ function setup(options: {
     $queryRaw: vi.fn((strings: TemplateStringsArray, ...values: unknown[]) => {
       rawQueryParameters.push(values);
       const sql = strings.join('');
+      if (sql.includes('FROM pg_extension')) return Promise.resolve([{ schema: 'public' }]);
       return Promise.resolve(sql.includes('COUNT(*)') ? [{ total: 1n }] : [{ id: venueId, distance_m: 500 }]);
     }),
     $executeRaw: vi.fn(async () => 1),
@@ -144,8 +145,19 @@ describe('venue catalog routes', () => {
     const response = await request(app).get('/api/v1/venues/nearby?lat=31.5&lng=74.35&radiusKm=1');
     expect(response.status).toBe(200);
     expect(response.body.data[0].distanceKm).toBe(0.5);
-    expect(rawQueryParameters).toHaveLength(2);
-    expect(rawQueryParameters.every(values => values.includes(74.35) && values.includes(31.5) && values.includes(1000))).toBe(true);
+    const spatialQueries = rawQueryParameters.filter(values => values.length > 0);
+    expect(spatialQueries).toHaveLength(2);
+    const flattened = spatialQueries.map(flattenSqlParameters);
+    expect(flattened[0]?.slice(0, 2)).toEqual([74.35, 31.5]);
+    expect(flattened.every(values => values.includes(74.35) && values.includes(31.5) && values.includes(1000))).toBe(true);
+  });
+
+  it('returns an empty review list and zero rating for a venue without reviews', async () => {
+    const { app } = setup({ role: 'PLAYER' });
+    const response = await request(app).get(`/api/v1/venues/${venueId}/reviews`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ items: [], ratingAverage: 0, ratingCount: 0 });
   });
 
   it('requires vendor authentication before requesting a media upload URL', async () => {
@@ -208,4 +220,10 @@ function mockMethod(client: PrismaClient, model: string, method: string): Return
   const root = client as unknown as Record<string, unknown>;
   if (model === '$queryRaw') return root.$queryRaw as ReturnType<typeof vi.fn>;
   return (root[model] as Record<string, unknown>)[method] as ReturnType<typeof vi.fn>;
+}
+
+function flattenSqlParameters(values: unknown[]): unknown[] {
+  return values.flatMap(value => typeof value === 'object' && value !== null && 'values' in value && Array.isArray(value.values)
+    ? flattenSqlParameters(value.values)
+    : [value]);
 }

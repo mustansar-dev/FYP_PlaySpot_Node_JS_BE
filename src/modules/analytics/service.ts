@@ -13,6 +13,10 @@ function minuteOfDay(value: string): number | undefined {
   return match ? Number(match[1]) * 60 + Number(match[2]) : undefined;
 }
 
+function pkDateKey(value: Date): string {
+  return new Date(value.getTime() + PKT_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 interface Interval { start: number; end: number; }
 
 function subtractIntervals(source: Interval[], removals: Interval[]): Interval[] {
@@ -93,7 +97,7 @@ export async function getVendorAnalytics(prisma: PrismaClient, ownerUserId: stri
           { booking: { venue: { vendorProfile: { ownerUserId }, deletedAt: null } } },
           { contribution: { bookingParticipant: { booking: { venue: { vendorProfile: { ownerUserId }, deletedAt: null } } } } },
         ],
-      }, select: { id: true, amountPaisa: true, method: true },
+      }, select: { id: true, amountPaisa: true, method: true, settledAt: true },
     }),
   ]);
   const now = new Date();
@@ -104,6 +108,21 @@ export async function getVendorAnalytics(prisma: PrismaClient, ownerUserId: stri
     bookings: validBookings,
   });
   const paidRevenuePaisa = payments.reduce((sum, payment) => sum + payment.amountPaisa, 0);
+  const dailyByDate = new Map<string, { date: string; bookingCount: number; paidRevenuePaisa: number }>();
+  for (let day = Date.parse(`${from}T00:00:00.000Z`); day <= Date.parse(`${to}T00:00:00.000Z`); day += 86_400_000) {
+    const date = new Date(day).toISOString().slice(0, 10);
+    dailyByDate.set(date, { date, bookingCount: 0, paidRevenuePaisa: 0 });
+  }
+  for (const booking of validBookings) {
+    if (booking.startsAt < range.start || booking.startsAt >= range.endExclusive) continue;
+    const day = dailyByDate.get(pkDateKey(booking.startsAt));
+    if (day) day.bookingCount += 1;
+  }
+  for (const payment of payments) {
+    if (!payment.settledAt) continue;
+    const day = dailyByDate.get(pkDateKey(payment.settledAt));
+    if (day) day.paidRevenuePaisa += payment.amountPaisa;
+  }
   return {
     from, to, bookingCount, paidRevenuePaisa,
     paidRevenuePKR: Number((paidRevenuePaisa / 100).toFixed(2)), currency: 'PKR',
@@ -114,5 +133,8 @@ export async function getVendorAnalytics(prisma: PrismaClient, ownerUserId: stri
       venuePaisa: payments.filter(payment => payment.method === 'PAY_AT_VENUE').reduce((sum, payment) => sum + payment.amountPaisa, 0),
       bankTransferPaisa: payments.filter(payment => payment.method === 'BANK_TRANSFER').reduce((sum, payment) => sum + payment.amountPaisa, 0),
     },
+    daily: [...dailyByDate.values()].map(day => ({
+      ...day, paidRevenuePKR: Number((day.paidRevenuePaisa / 100).toFixed(2)),
+    })),
   };
 }

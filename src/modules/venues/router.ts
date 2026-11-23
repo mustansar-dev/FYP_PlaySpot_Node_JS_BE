@@ -292,7 +292,7 @@ export function createVenueRouter({
         ...(maxPricePKR !== undefined ? { maxPricePaisa: maxPricePKR * 100 } : {}),
         ...(minRating !== undefined ? { minRating } : {}),
       });
-      const distances = new Map(rows.map(item => [item.id, item.distance_m / 1000]));
+      const distances = new Map(rows.flatMap(item => item.distance_m === null ? [] : [[item.id, item.distance_m / 1000]]));
       const items = rows.length ? await prisma.venue.findMany({
         where: { id: { in: rows.map(item => item.id) }, deletedAt: null, published: true }, include: venueInclude,
       }) : [];

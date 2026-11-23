@@ -39,6 +39,7 @@ src/generated/prisma/
 *.sqlite-journal
 *.log
 logs/
+.data/payment-receipts/
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*

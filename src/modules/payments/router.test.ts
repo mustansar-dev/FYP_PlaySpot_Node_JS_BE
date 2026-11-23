@@ -41,7 +41,8 @@ function paymentRecord(options: { ownerId?: string; payerId?: string; method?: s
       status: 'REGISTERED', paymentStatus: 'PENDING', totalEntryFeePaisa: 10_000,
       tournament,
     } : null,
-    receipts: [], webhookEvents: [], audits: [],
+    receipts: [] as Array<{ id: string; storagePath: string; fileName: string; mimeType: string; sizeBytes: number; status: string }>,
+    webhookEvents: [], audits: [],
   };
 }
 
@@ -67,6 +68,7 @@ function setup(options: {
     $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma)),
     $queryRaw: vi.fn(async () => []),
     paymentStatusAudit: { create: vi.fn(async () => ({})), createMany: vi.fn(async () => ({ count: 0 })) },
+    paymentReceipt: { create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'receipt-id', ...data })) },
     paymentContribution: { update: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
     tournamentParticipant: {
       findUnique: vi.fn(async () => options.tournamentParticipant ?? null),
@@ -91,6 +93,74 @@ function setup(options: {
 }
 
 describe('payment route safety', () => {
+  it('lets a vendor retrieve the bank transfer details they configured', async () => {
+    const { app, token, prisma } = setup({ role: 'VENDOR' });
+    vi.mocked(prisma.vendorPaymentInstructions.findFirst).mockResolvedValueOnce({
+      vendorProfileId: 'vendor-profile-id', accountTitle: 'Arena Account', bankName: 'Example Bank',
+      iban: 'PK00EXAMPLE0000000000000000', accountNumber: null, instructions: 'Use your booking ID as reference.', active: true,
+    } as never);
+    const response = await request(app).get('/api/v1/vendors/me/payment-instructions').set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ configured: true, bankName: 'Example Bank', active: true });
+  });
+
+  it('accepts an authenticated multipart receipt and submits it for vendor review', async () => {
+    const buffer = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    const storage = {
+      createSignedUpload: vi.fn(),
+      storeUploadedFile: vi.fn(async () => ({ storagePath: `${playerId}/${paymentId}/55555555-5555-4555-8555-555555555555.png` })),
+      getObjectInfo: vi.fn(async () => ({ exists: true, sizeBytes: buffer.length, mimeType: 'image/png' })),
+      createSignedDownload: vi.fn(), deleteObject: vi.fn(async () => undefined),
+    } satisfies PaymentReceiptStorage;
+    const { app, token, prisma } = setup({
+      payment: paymentRecord({ method: 'BANK_TRANSFER', status: 'AWAITING_TRANSFER', provider: 'MANUAL' }), storage,
+    });
+    const response = await request(app).post(`/api/v1/payments/${paymentId}/receipt/upload`)
+      .set('Authorization', `Bearer ${token}`).attach('receipt', buffer, { filename: 'receipt.png', contentType: 'image/png' });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.reviewStatus).toBe('SUBMITTED');
+    expect(storage.storeUploadedFile).toHaveBeenCalledWith(expect.objectContaining({ payerUserId: playerId, paymentId, mimeType: 'image/png', sizeBytes: buffer.length }));
+    expect(prisma.paymentReceipt.create).toHaveBeenCalledOnce();
+  });
+
+  it('serves a private receipt file to its payer', async () => {
+    const buffer = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    const payment = {
+      ...paymentRecord({ method: 'BANK_TRANSFER', status: 'PROOF_SUBMITTED', provider: 'MANUAL' }),
+      receipts: [{ id: 'receipt-id', storagePath: `${playerId}/${paymentId}/55555555-5555-4555-8555-555555555555.png`, fileName: 'receipt.png', mimeType: 'image/png', sizeBytes: buffer.length, status: 'SUBMITTED' }],
+    };
+    const storage = {
+      createSignedUpload: vi.fn(), getObjectInfo: vi.fn(), createSignedDownload: vi.fn(),
+      readObject: vi.fn(async () => buffer), deleteObject: vi.fn(),
+    } satisfies PaymentReceiptStorage;
+    const { app, token } = setup({ payment, storage });
+    const response = await request(app).get(`/api/v1/payments/${paymentId}/receipt/file`).set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toMatch(/image\/png/);
+    expect(response.headers['cache-control']).toBe('private, no-store');
+    expect(response.body).toEqual(buffer);
+    expect(storage.readObject).toHaveBeenCalledOnce();
+  });
+
+  it('does not serve a receipt file to an unrelated vendor', async () => {
+    const payment = {
+      ...paymentRecord({ ownerId: otherVendorId, method: 'BANK_TRANSFER', status: 'PROOF_SUBMITTED', provider: 'MANUAL' }),
+      receipts: [{ id: 'receipt-id', storagePath: `${playerId}/${paymentId}/55555555-5555-4555-8555-555555555555.png`, fileName: 'receipt.png', mimeType: 'image/png', sizeBytes: 10, status: 'SUBMITTED' }],
+    };
+    const storage = {
+      createSignedUpload: vi.fn(), getObjectInfo: vi.fn(), createSignedDownload: vi.fn(),
+      readObject: vi.fn(), deleteObject: vi.fn(),
+    } satisfies PaymentReceiptStorage;
+    const { app, token } = setup({ role: 'VENDOR', payment, storage });
+    const response = await request(app).get(`/api/v1/payments/${paymentId}/receipt/file`).set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(404);
+    expect(storage.readObject).not.toHaveBeenCalled();
+  });
+
   it('creates a server-priced tournament team entry payment for its registered leader', async () => {
     const participant = {
       id: '77777777-7777-4777-8777-777777777777', userId: playerId, status: 'REGISTERED',

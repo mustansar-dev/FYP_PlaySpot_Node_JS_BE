@@ -1,6 +1,31 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/client.js';
+import { HttpError } from '../../common/httpError.js';
 
-export interface NearbyVenueRow { id: string; distance_m: number; }
+export interface NearbyVenueRow { id: string; distance_m: number | null; }
+
+type PostgisQueryable = Pick<PrismaClient, '$queryRaw'>;
+
+async function postgisSql(prisma: PostgisQueryable) {
+  const rows = await prisma.$queryRaw<Array<{ schema: string }>>`
+    SELECT n.nspname AS schema
+    FROM pg_extension e
+    JOIN pg_namespace n ON n.oid = e.extnamespace
+    WHERE e.extname = 'postgis'
+    LIMIT 1
+  `;
+  const schema = rows[0]?.schema;
+  if (!schema || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(schema)) {
+    throw new HttpError(503, 'SPATIAL_SEARCH_UNAVAILABLE', 'Venue distance search is not available because PostGIS is not installed.');
+  }
+  const namespace = `"${schema}"`;
+  return {
+    geography: Prisma.raw(`${namespace}."geography"`),
+    dWithin: Prisma.raw(`${namespace}."st_dwithin"`),
+    distance: Prisma.raw(`${namespace}."st_distance"`),
+    makePoint: Prisma.raw(`${namespace}."st_makepoint"`),
+    setSrid: Prisma.raw(`${namespace}."st_setsrid"`),
+  };
+}
 
 /** Spatial filtering stays in PostgreSQL and uses the location GiST index. */
 export async function findNearbyVenueIds(
@@ -11,6 +36,7 @@ export async function findNearbyVenueIds(
     indoorOutdoor?: 'INDOOR' | 'OUTDOOR'; minPricePaisa?: number; maxPricePaisa?: number; minRating?: number;
   },
 ): Promise<{ rows: NearbyVenueRow[]; total: number }> {
+  const postgis = await postgisSql(prisma);
   const filters: Prisma.Sql[] = [];
   if (input.q) filters.push(Prisma.sql`(v.name ILIKE ${`%${input.q}%`} OR v.address ILIKE ${`%${input.q}%`} OR v.city ILIKE ${`%${input.q}%`})`);
   if (input.city) filters.push(Prisma.sql`v.city ILIKE ${input.city}`);
@@ -32,36 +58,25 @@ export async function findNearbyVenueIds(
     SELECT AVG(r.stars)::double precision FROM public.reviews r WHERE r.venue_id = v.id
   ), 0) >= ${input.minRating}`);
   const filterSql = filters.length ? Prisma.sql`AND ${Prisma.join(filters, ' AND ')}` : Prisma.empty;
+  const origin = Prisma.sql`${postgis.setSrid}(${postgis.makePoint}(${input.longitude}, ${input.latitude}), 4326)::${postgis.geography}`;
+  const withinRadius = Prisma.sql`(v.location IS NULL OR ${postgis.dWithin}(v.location, ${origin}, ${input.radiusMeters}))`;
   const point = prisma.$queryRaw<Array<{ total: bigint }>>`
     SELECT COUNT(*)::bigint AS total
     FROM public.venues v
     WHERE v.deleted_at IS NULL
       AND v.published = TRUE
-      AND v.location IS NOT NULL
-      AND extensions.ST_DWithin(
-        v.location,
-        extensions.ST_SetSRID(extensions.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::extensions.geography,
-        ${input.radiusMeters}
-      )
+      AND ${withinRadius}
       ${filterSql}
   `;
   const result = prisma.$queryRaw<NearbyVenueRow[]>`
     SELECT v.id::text AS id,
-      extensions.ST_Distance(
-        v.location,
-        extensions.ST_SetSRID(extensions.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::extensions.geography
-      ) AS distance_m
+      CASE WHEN v.location IS NULL THEN NULL ELSE ${postgis.distance}(v.location, ${origin}) END AS distance_m
     FROM public.venues v
     WHERE v.deleted_at IS NULL
       AND v.published = TRUE
-      AND v.location IS NOT NULL
-      AND extensions.ST_DWithin(
-        v.location,
-        extensions.ST_SetSRID(extensions.ST_MakePoint(${input.longitude}, ${input.latitude}), 4326)::extensions.geography,
-        ${input.radiusMeters}
-      )
+      AND ${withinRadius}
       ${filterSql}
-    ORDER BY distance_m ASC, v.id ASC
+    ORDER BY distance_m ASC NULLS LAST, v.id ASC
     OFFSET ${input.offset}
     LIMIT ${input.limit}
   `;
@@ -70,7 +85,7 @@ export async function findNearbyVenueIds(
 }
 
 export async function setVenuePoint(
-  prisma: Pick<PrismaClient, '$executeRaw'>,
+  prisma: Pick<PrismaClient, '$executeRaw' | '$queryRaw'>,
   venueId: string,
   latitude: number | null,
   longitude: number | null,
@@ -79,9 +94,10 @@ export async function setVenuePoint(
     await prisma.$executeRaw`UPDATE public.venues SET location = NULL WHERE id = ${venueId}::uuid`;
     return;
   }
+  const postgis = await postgisSql(prisma);
   await prisma.$executeRaw`
     UPDATE public.venues
-    SET location = extensions.ST_SetSRID(extensions.ST_MakePoint(${longitude}, ${latitude}), 4326)::extensions.geography
+    SET location = ${postgis.setSrid}(${postgis.makePoint}(${longitude}, ${latitude}), 4326)::${postgis.geography}
     WHERE id = ${venueId}::uuid
   `;
 }
