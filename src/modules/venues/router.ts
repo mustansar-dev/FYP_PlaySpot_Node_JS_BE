@@ -226,6 +226,7 @@ export function createVenueRouter({
           { name: { contains: query.q, mode: 'insensitive' } },
           { address: { contains: query.q, mode: 'insensitive' } },
           { city: { contains: query.q, mode: 'insensitive' } },
+          { locationNote: { contains: query.q, mode: 'insensitive' } },
         ] } : {}),
         ...(query.city ? { city: { equals: query.city, mode: 'insensitive' } } : {}),
         ...(query.sport ? { sports: { some: { sport: { OR: [

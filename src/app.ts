@@ -18,6 +18,7 @@ import { RealtimeHub } from './realtime/hub.js';
 import { createCommunityRouter } from './modules/community/router.js';
 import { createAnalyticsRouter } from './modules/analytics/router.js';
 import { createNotificationsRouter } from './modules/notifications/router.js';
+import { createMapsRouter } from './modules/maps/router.js';
 
 export interface AppOptions {
   apiPrefix: string;
@@ -33,6 +34,7 @@ export interface AppOptions {
   community?: { prisma: PrismaClient; accessSecret: string; realtime: RealtimeHub };
   analytics?: { prisma: PrismaClient; accessSecret: string };
   notifications?: { prisma: PrismaClient; accessSecret: string };
+  maps?: { geoapifyApiKey?: string };
 }
 
 export function createApp(options: AppOptions): Express {
@@ -64,6 +66,7 @@ export function createApp(options: AppOptions): Express {
   if (options.community) app.use(`${options.apiPrefix}`, createCommunityRouter(options.community));
   if (options.analytics) app.use(`${options.apiPrefix}`, createAnalyticsRouter(options.analytics));
   if (options.notifications) app.use(`${options.apiPrefix}`, createNotificationsRouter(options.notifications));
+  if (options.maps) app.use(`${options.apiPrefix}`, createMapsRouter(options.maps));
   app.use(notFound);
   app.use(errorHandler);
 

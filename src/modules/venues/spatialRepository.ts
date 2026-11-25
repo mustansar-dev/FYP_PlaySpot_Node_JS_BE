@@ -38,7 +38,7 @@ export async function findNearbyVenueIds(
 ): Promise<{ rows: NearbyVenueRow[]; total: number }> {
   const postgis = await postgisSql(prisma);
   const filters: Prisma.Sql[] = [];
-  if (input.q) filters.push(Prisma.sql`(v.name ILIKE ${`%${input.q}%`} OR v.address ILIKE ${`%${input.q}%`} OR v.city ILIKE ${`%${input.q}%`})`);
+  if (input.q) filters.push(Prisma.sql`(v.name ILIKE ${`%${input.q}%`} OR v.address ILIKE ${`%${input.q}%`} OR v.city ILIKE ${`%${input.q}%`} OR v.location_note ILIKE ${`%${input.q}%`})`);
   if (input.city) filters.push(Prisma.sql`v.city ILIKE ${input.city}`);
   if (input.sport) filters.push(Prisma.sql`EXISTS (
     SELECT 1 FROM public.venue_sports vs JOIN public.sports s ON s.id = vs.sport_id
@@ -59,7 +59,21 @@ export async function findNearbyVenueIds(
   ), 0) >= ${input.minRating}`);
   const filterSql = filters.length ? Prisma.sql`AND ${Prisma.join(filters, ' AND ')}` : Prisma.empty;
   const origin = Prisma.sql`${postgis.setSrid}(${postgis.makePoint}(${input.longitude}, ${input.latitude}), 4326)::${postgis.geography}`;
-  const withinRadius = Prisma.sql`(v.location IS NULL OR ${postgis.dWithin}(v.location, ${origin}, ${input.radiusMeters}))`;
+  // Older venue rows can have latitude/longitude populated while the PostGIS
+  // geography column is still NULL. Compute a point from those coordinates as
+  // a read fallback so those listings get a real distance and radius check.
+  const coordinatePoint = Prisma.sql`${postgis.setSrid}(${postgis.makePoint}(v.longitude, v.latitude), 4326)::${postgis.geography}`;
+  const withinRadius = Prisma.sql`(
+    (v.location IS NOT NULL AND ${postgis.dWithin}(v.location, ${origin}, ${input.radiusMeters}))
+    OR (v.location IS NULL AND v.latitude IS NOT NULL AND v.longitude IS NOT NULL
+      AND ${postgis.dWithin}(${coordinatePoint}, ${origin}, ${input.radiusMeters}))
+    OR (v.location IS NULL AND (v.latitude IS NULL OR v.longitude IS NULL))
+  )`;
+  const distanceExpression = Prisma.sql`CASE
+    WHEN v.location IS NOT NULL THEN ${postgis.distance}(v.location, ${origin})
+    WHEN v.latitude IS NOT NULL AND v.longitude IS NOT NULL THEN ${postgis.distance}(${coordinatePoint}, ${origin})
+    ELSE NULL
+  END`;
   const point = prisma.$queryRaw<Array<{ total: bigint }>>`
     SELECT COUNT(*)::bigint AS total
     FROM public.venues v
@@ -69,8 +83,7 @@ export async function findNearbyVenueIds(
       ${filterSql}
   `;
   const result = prisma.$queryRaw<NearbyVenueRow[]>`
-    SELECT v.id::text AS id,
-      CASE WHEN v.location IS NULL THEN NULL ELSE ${postgis.distance}(v.location, ${origin}) END AS distance_m
+    SELECT v.id::text AS id, ${distanceExpression} AS distance_m
     FROM public.venues v
     WHERE v.deleted_at IS NULL
       AND v.published = TRUE
